@@ -1839,6 +1839,22 @@ INLINE = {
         S, CAP, "AGENT_EVALUATION"),
     "PAPER_STEP_LEFT_A_TRANSACTION_OPEN": (S, INT, "AGENT_EVALUATION"),
     "PAPER_STEP_RETURNED_AN_ERROR": (S, INT, "AGENT_EVALUATION"),
+    # (rc6.3d pass-cancel-safety) the pass connection's own cancel safety.
+    # The post-cut ROLLBACK (asyncpg's await of the server's acknowledgement
+    # of the cancelled statement) did not return within CONNECTION_RESET_
+    # TIMEOUT_S: the pass connection was terminated deliberately instead of
+    # letting the bound cancel asyncpg's acknowledgement future (which made
+    # every later statement raise CancelledError and the pass end silently,
+    # unrecorded). A step not started because the pass connection was
+    # already closed (terminated after a cut, or by paper_derek for an owed
+    # sequence that outlived its bounds). And the pass's record and heartbeat
+    # written on a FRESH pool connection -- after ENDING the closed
+    # connection's backend (pg_terminate_backend) so an orphan can never
+    # keep the pass's session-level advisory lock -- when the pass connection
+    # ended closed. All AGENT_EVALUATION integrity: the pass still records.
+    "PAPER_PASS_CONNECTION_RESET_TIMED_OUT": (S, INT, "AGENT_EVALUATION"),
+    "PAPER_STEP_SKIPPED_PASS_CONNECTION_CLOSED": (S, CAP, "AGENT_EVALUATION"),
+    "PAPER_PASS_RECORDED_ON_A_FRESH_CONNECTION": (S, INT, "AGENT_EVALUATION"),
     # (rc6.3c pass-hardening, round 3) the shadow_settlement step stops
     # examining pending shadows SETTLE_STOP_BEFORE_DEADLINE_S before the pass
     # step's deadline and names the cut and the shadows not examined (a

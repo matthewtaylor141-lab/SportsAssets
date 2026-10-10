@@ -47,6 +47,7 @@ is an ENTER submitted as a paper order naming that decision.
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import json
 import math
@@ -1818,20 +1819,50 @@ ST_ENTER_ROW_INSERTING = "ENTER_ROW_INSERTING"
 #: request, a transaction rolls back. A task still running past it, and past
 #: a second wait after its own cancellation, has its connection terminated.
 ENTER_ABANDON_WAIT_S = 5.0
-#: After a connection is terminated a statement on it fails at once; a task
-#: still running past this is no longer on the connection (nothing can
-#: collide with it) and is left to finish on its own, its result retrieved.
+#: The terminate budget, spent in two parts (RC6.3d pass-cancel-safety):
+#: FIRST on the cancelled statement's CancelRequest having been SENT --
+#: asyncpg sends it on a second connection, and Connection.terminate()
+#: cancels the task sending it, so a terminate before the request left
+#: lost it and the backend ran the cut statement to its end, holding the
+#: pass's session-level advisory lock (an hour for a hung read; every pass
+#: meanwhile refused ADVISORY_LOCK_HELD) -- THEN, after the terminate (a
+#: statement on the connection fails at once), on the task ending. A task
+#: still pending after that can only be waiting on the dead connection's
+#: acknowledgement future, which nothing will ever resolve: it is cancelled
+#: and its result retrieved when it ends. The sum is unchanged, so
+#: owed_enter_overrun_bound_s is unchanged. The backend of a terminated
+#: pass connection is ENDED by paper_runtime.run_once from a fresh
+#: connection (reap_backend), whether or not the request was sent.
 ENTER_TERMINATED_WAIT_S = 1.0
 #: process counters. abandoned: owed ENTERs stopped before their outcome was
 #: durable (named ENTER_ORDER_ABANDONED, or -- abandoned_unrecorded -- left
 #: to the backstop); cut_before_the_enter_row: the INSERT itself was cut and
 #: the server did not commit the row (nothing owed); outcome_durable_when_
-#: cut: the order or its refusal was already durable (nothing to name).
+#: cut: the order or its refusal was already durable (nothing to name);
+#: cancel_requests_lost_at_terminate: a connection terminated before its
+#: cancelled statement's CancelRequest had been sent (the wait ran out:
+#: its backend is left to paper_runtime's reap).
 OWED_ORDER_COUNTS: dict = {"completed_after_cancellation": 0,
                            "abandoned": 0, "abandoned_unrecorded": 0,
                            "cut_before_the_enter_row": 0,
                            "outcome_durable_when_cut": 0,
-                           "connections_terminated": 0}
+                           "connections_terminated": 0,
+                           "cancel_requests_lost_at_terminate": 0}
+#: the connections _settle terminated, newest last: backend pid, whether the
+#: cancelled statement's CancelRequest had been sent, the wait spent on it
+#: (read by paper_runtime to name what ended the pass connection)
+TERMINATIONS: collections.deque = collections.deque(maxlen=16)
+
+
+def last_termination(pid) -> dict | None:
+    """The newest termination of the connection whose backend pid is `pid`
+    (None when _settle terminated no such connection, or pid is None)."""
+    if pid is None:
+        return None
+    for note in reversed(TERMINATIONS):
+        if note.get("backend_pid") == pid:
+            return dict(note)
+    return None
 
 
 def owed_enter_overrun_bound_s() -> float:
@@ -1877,10 +1908,46 @@ async def _wait_out(fut, timeout_s: float | None) -> int:
     return absorbed
 
 
-def _terminate(conn) -> bool:
+def _protocol(conn):
+    """The connection's asyncpg protocol, or None (a stand-in connection)."""
+    try:
+        return conn._protocol
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+def _cancel_in_flight(conn) -> bool:
+    """Whether asyncpg has a cancel request in flight on `conn` (a statement
+    was cancelled and the server has not acknowledged it). The compiled
+    protocol in asyncpg 0.31.0 exposes NO readable cancel_sent_waiter /
+    cancel_waiter attribute -- only the predicate _is_cancelling() and the
+    coroutine _wait_for_cancellation(), which is exactly what Pool.release()
+    itself uses; this lane uses those, not the (absent) attributes."""
+    p = _protocol(conn)
+    if p is None:
+        return False
+    try:
+        return bool(p._is_cancelling())
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
+def _server_pid(conn):
+    """The connection's backend pid, or None (a stand-in connection)."""
+    try:
+        return int(conn.get_server_pid())
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+def _terminate(conn, *, cancel_sent) -> bool:
     """Close the connection at once (asyncpg Connection.terminate): a task
     still running on it fails, and no later user -- the caller, its pool --
-    can collide with it. Never raises."""
+    can collide with it. The backend pid captured here, and whether the
+    cancelled statement's CancelRequest had been sent before the terminate,
+    are recorded on TERMINATIONS so paper_runtime can END the backend from
+    a fresh connection and name what happened. Never raises."""
+    pid = _server_pid(conn)
     fn = getattr(conn, "terminate", None)
     if fn is None:
         return False
@@ -1889,6 +1956,10 @@ def _terminate(conn) -> bool:
     except Exception:                                           # noqa: BLE001
         return False
     OWED_ORDER_COUNTS["connections_terminated"] += 1
+    if cancel_sent is False:
+        OWED_ORDER_COUNTS["cancel_requests_lost_at_terminate"] += 1
+    TERMINATIONS.append({"backend_pid": pid, "cancel_sent": cancel_sent,
+                         "at": time.time()})
     return True
 
 
@@ -1909,13 +1980,62 @@ async def _settle(conn, task, *, cancel_first: bool) -> tuple[int, bool]:
         absorbed += await _wait_out(task, ENTER_ABANDON_WAIT_S)
     terminated = False
     if not task.done():
-        terminated = _terminate(conn)
-        absorbed += await _wait_out(task, ENTER_TERMINATED_WAIT_S)
+        # BEFORE TERMINATING, LET THE CANCELLED STATEMENT'S CancelRequest BE
+        # SENT (RC6.3d). Connection.terminate() cancels the task that opens
+        # the second connection and writes the CancelRequest; done before it
+        # was written, the request is lost and the backend runs the cut
+        # statement to its end, holding the pass's session-level advisory
+        # lock. So the terminate budget (ENTER_TERMINATED_WAIT_S) is spent
+        # FIRST waiting for that request to be sent (cancel_sent_waiter, as
+        # Connection.close() and Pool.release() do), THEN -- after the
+        # terminate -- on the task ending; one deadline covers both, so the
+        # bound owed_enter_overrun_bound_s does not change. Whether the
+        # request was sent is recorded, and paper_runtime ENDS the backend
+        # from a fresh connection either way (a terminate cannot, and must
+        # not wait for, an unbounded cancel connect).
+        end = time.monotonic() + ENTER_TERMINATED_WAIT_S
+        sent, got = await _await_cancel_sent(conn, end)
+        absorbed += got
+        terminated = _terminate(conn, cancel_sent=sent)
+        absorbed += await _wait_out(task, max(0.0, end - time.monotonic()))
     if task.done():
         _retrieve(task)
     else:
         task.add_done_callback(_retrieve)
     return absorbed, terminated
+
+
+async def _await_cancel_sent(conn, end: float):
+    """Wait, until the monotonic instant `end`, for the cancelled
+    statement's cancel to have been SENT and acknowledged
+    (protocol._wait_for_cancellation, as Pool.release() does -- it awaits
+    the CancelRequest having been written and the server's acknowledgement).
+    Returns (result, absorbed): result is True (the cancel completed: the
+    backend got it, terminating is clean), False (a cancel is in flight but
+    did not complete in the bound: terminating now may lose the request, so
+    paper_runtime ends the backend from a fresh connection), or None (no
+    cancel in flight, or a stand-in connection: nothing to wait for);
+    absorbed is how many of the caller's cancellations were swallowed here
+    (added to _settle's, so the caller still re-raises once the connection
+    is free). NEVER cancels asyncpg's own cancel futures (a cancelled
+    _wait_for_cancellation leaves them intact, as the pool relies on)."""
+    p = _protocol(conn)
+    if p is None or not _cancel_in_flight(conn):
+        return None, 0
+    absorbed = 0
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            return False, absorbed
+        try:
+            await asyncio.wait_for(p._wait_for_cancellation(), left)
+            return True, absorbed
+        except (asyncio.TimeoutError, TimeoutError):
+            return False, absorbed
+        except asyncio.CancelledError:
+            absorbed += 1        # the caller's cancellation: absorb, retry
+        except Exception:                                      # noqa: BLE001
+            return None, absorbed
 
 
 async def owed_order(conn, ctx: dict, *, decision_id: str, strategy: str,

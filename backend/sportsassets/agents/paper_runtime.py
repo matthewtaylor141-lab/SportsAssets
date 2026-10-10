@@ -462,6 +462,50 @@ def default_steps() -> list:
 #  * THE RECORD ITSELF. paper_session_health's write is bounded by what is
 #    left of HARD_TIMEOUT_S; a record that hangs is a named HEALTH error.
 #
+# THE PASS CONNECTION ITSELF (RC6.3d pass-cancel-safety; two pre-existing
+# hazards an independent race review found by fault injection, asyncpg
+# 0.31.0 cancel timing):
+#
+#  * A CUT STATEMENT'S CANCEL ACKNOWLEDGEMENT. asyncpg cancels a cut
+#    statement by a CancelRequest on a second connection, and EVERY later
+#    statement on the connection first awaits the server's acknowledgement
+#    (the cancelled statement's ErrorResponse and ReadyForQuery). The
+#    post-cut ROLLBACK ran under asyncio.timeout(CONNECTION_RESET_TIMEOUT_S):
+#    an acknowledgement slower than the bound had the bound cancel THAT
+#    await, which cancels asyncpg's acknowledgement future itself -- from
+#    then until the server answered, every statement (the record, the
+#    unlock, the pool's release) raised CancelledError, not an asyncpg
+#    error, and run_once propagated it: no paper_session_health row, no
+#    heartbeat, the scheduled task ended cancelled, silently. Now the
+#    ROLLBACK runs as a task WAITED FOR under the bound, never cancelled by
+#    it; a server that does not answer within the bound has the pass
+#    connection TERMINATED deliberately, named R_CONNECTION_RESET_TIMED_OUT,
+#    and the pass goes on (below). A CancelledError that is not the
+#    caller's own (asyncio's task.cancelling()) is recorded by name, never
+#    propagated as a silent unrecorded pass; the caller's own always is.
+#  * A TERMINATED PASS CONNECTION'S BACKEND. paper_derek terminates the pass
+#    connection when an owed ENTER's sequence outlives its bounds (and the
+#    pass does, above). Connection.terminate() cancels the task SENDING the
+#    CancelRequest; sent too late (its own connection to the server still
+#    opening), the request was lost and the backend ran the cut statement
+#    to its end -- holding the pass's session-level advisory lock
+#    (client_connection_check_interval 0: a backend that writes nothing
+#    never notices its client is gone), so every pass meanwhile refused
+#    ADVISORY_LOCK_HELD (an hour for a hung read). Now paper_derek waits
+#    (inside its ENTER_TERMINATED_WAIT_S) for the request to have been sent
+#    before terminating, and run_once -- which knows the connection's
+#    backend pid from its acquire -- ENDS the backend from a FRESH pool
+#    connection (pg_terminate_backend; a backend that exits releases its
+#    session-level advisory locks server-side) whenever the pass connection
+#    ends closed, whoever closed it.
+#  * WHEN THE PASS CONNECTION IS CLOSED mid-pass, every later step is
+#    skipped by name (R_STEP_SKIPPED_CONNECTION_CLOSED) instead of being
+#    started against a dead connection, and the record -- which cannot be
+#    written on it -- is NOT dropped: run_once writes paper_session_health
+#    and the heartbeat on the fresh connection, after the backend is ended,
+#    named R_RECORDED_ON_A_FRESH_CONNECTION with what ended the connection
+#    and what became of its backend (`pass_connection` on the record).
+#
 # AFTER EVERY STEP (not only a cut one) the pass looks at its connection: a
 # transaction the step left open, or aborted, is rolled back and named
 # (R_STEP_LEFT_TRANSACTION), so the record never fails with
@@ -479,16 +523,38 @@ PASS_RECORD_RESERVE_S = 10.0
 #: a step is not started with less than this of pass time left (it could do
 #: nothing in it but be cut); it is recorded as skipped instead
 STEP_MIN_START_S = 1.0
-#: the bound on putting the connection back after a step was cut
+#: the bound on putting the connection back after a step was cut (the
+#: ROLLBACK, which waits for the server's acknowledgement of the cancelled
+#: statement); a connection not back within it is terminated, by name
 CONNECTION_RESET_TIMEOUT_S = 5.0
 #: pass time kept after the record for the advisory-lock release
 LOCK_RELEASE_MARGIN_S = 1.0
+#: the bound on what run_once does on a FRESH pool connection when the pass
+#: connection ends closed: ending the pass connection's backend, writing
+#: paper_session_health and the heartbeat (outside HARD_TIMEOUT_S, which
+#: bounds the pass; the scheduler coalesces, it never queues a second pass)
+CLOSED_CONNECTION_RECORD_TIMEOUT_S = 15.0
+#: how long reap_backend waits for a signalled backend to be gone from
+#: pg_stat_activity (its exit is what releases the advisory lock)
+BACKEND_EXIT_WAIT_S = 3.0
 R_STEP_EXCEEDED = "PAPER_STEP_EXCEEDED_PASS_TIME"
 R_STEP_SKIPPED = "PAPER_STEP_SKIPPED_PASS_TIME_SPENT"
 R_STEP_NOT_STARTED_ENTER_OVERRUN = (
     "PAPER_STEP_NOT_STARTED_ENTER_OVERRUN_WOULD_EXCEED_RESERVE")
 R_STEP_LEFT_TRANSACTION = "PAPER_STEP_LEFT_A_TRANSACTION_OPEN"
 R_STEP_RETURNED_ERROR = "PAPER_STEP_RETURNED_AN_ERROR"
+#: (RC6.3d) the post-cut ROLLBACK -- the server's acknowledgement of the
+#: cancelled statement -- did not return within CONNECTION_RESET_TIMEOUT_S:
+#: the pass connection was terminated deliberately (errors.CONNECTION_RESET)
+R_CONNECTION_RESET_TIMED_OUT = "PAPER_PASS_CONNECTION_RESET_TIMED_OUT"
+#: (RC6.3d) a step not started because the pass connection was closed
+#: before it (terminated after a cut, or by paper_derek)
+R_STEP_SKIPPED_CONNECTION_CLOSED = "PAPER_STEP_SKIPPED_PASS_CONNECTION_CLOSED"
+#: (RC6.3d) the pass connection was closed before the record: run_once
+#: ended its backend and wrote paper_session_health and the heartbeat on a
+#: fresh pool connection (errors.PASS_CONNECTION; `pass_connection` says
+#: what ended the connection and what became of its backend)
+R_RECORDED_ON_A_FRESH_CONNECTION = "PAPER_PASS_RECORDED_ON_A_FRESH_CONNECTION"
 
 #: THE DEFAULT STEPS THAT CAN OWE AN ENTER: each decides valuations and, on an
 #: ENTER, runs the ENTER's row and paper order as an owed sequence
@@ -542,31 +608,155 @@ def _in_transaction(conn) -> bool:
         return False
 
 
-async def _end_open_transaction(conn, *, was_in_tx: bool
+def _closed(conn) -> bool:
+    """Whether the pass connection is closed (terminated, or lost) -- and so
+    cannot carry the record. True ALSO when is_closed() RAISES: a pooled
+    connection that was terminated is detached from its proxy, and the
+    proxy then raises InterfaceError ('connection has been released back to
+    the pool') on every call -- it is unusable, which is what the callers
+    need to know. (A plain object with no is_closed is treated as open:
+    stand-in connections in tests that never terminate.)"""
+    fn = getattr(conn, "is_closed", None)
+    if fn is None:
+        return False
+    try:
+        return bool(fn())
+    except Exception:                                          # noqa: BLE001
+        return True
+
+
+def _cancelling(conn) -> bool:
+    """Whether asyncpg has a cancel request in flight on `conn`: a statement
+    was cancelled and the server has not yet acknowledged it (the pool's own
+    predicate before its reset; every later statement waits on it)."""
+    try:
+        proto = conn._protocol
+        return bool(proto is not None and proto._is_cancelling())
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def connection_identity(conn) -> dict:
+    """The connection's backend pid and local (client) port, read without a
+    statement -- what `reap_backend` needs to END the backend of a connection
+    that is closed. None for each that cannot be read (a stand-in connection
+    in a test; a unix-socket connection has no port)."""
+    ident: dict[str, Any] = {"backend_pid": None, "client_port": None}
+    try:
+        ident["backend_pid"] = int(conn.get_server_pid())
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        tr = conn._transport
+        name = tr.get_extra_info("sockname") if tr is not None else None
+        if isinstance(name, tuple) and len(name) >= 2:
+            ident["client_port"] = int(name[1])
+    except Exception:                                          # noqa: BLE001
+        pass
+    return ident
+
+
+def _terminate_quietly(conn) -> bool:
+    """Close the pass connection at once (asyncpg Connection.terminate).
+    Never raises; False when it was already closed or cannot be."""
+    try:
+        if _closed(conn):
+            return False
+        conn.terminate()
+        return True
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def _retrieve(task) -> None:
+    """A finished task's exception is read, so it is never logged unread."""
+    try:
+        if task.done() and not task.cancelled():
+            task.exception()
+    except Exception:                                          # noqa: BLE001
+        pass
+
+
+async def _end_open_transaction(conn, *, was_in_tx: bool,
+                                after_cut: bool = False
                                 ) -> tuple[bool, str | None]:
     """Roll back a transaction the step opened and did not close (open or
     aborted). A transaction the CALLER held before the pass is not the pass's
     to end. Returns (whether one was rolled back, the problem by name or
-    None)."""
-    ended = False
+    None).
+
+    THE STATEMENT RUNS AS A TASK WAITED FOR UNDER THE BOUND, NEVER CANCELLED
+    BY IT (RC6.3d). After a cut, the connection's next statement first
+    awaits asyncpg's acknowledgement future for the cancelled statement
+    (the server's ErrorResponse and ReadyForQuery). asyncio.timeout around
+    the ROLLBACK cancelled THAT await when the acknowledgement was slower
+    than CONNECTION_RESET_TIMEOUT_S -- which cancels the acknowledgement
+    future itself, so that until the server answered every statement on the
+    connection (the record, the unlock, the pool's release) raised
+    CancelledError and run_once propagated it: an unrecorded pass, a
+    scheduled task ended cancelled, silently. Now a ROLLBACK the server does
+    not answer within the bound (a cancel it does not acknowledge in time,
+    a server that is wedged) has the pass connection TERMINATED deliberately
+    and is named R_CONNECTION_RESET_TIMED_OUT; the pass goes on, its later
+    steps skipped by name, its record written by run_once on a fresh
+    connection once this connection's backend is ended. After a cut outside
+    a transaction (an autocommit statement) the acknowledgement is waited
+    out the same way with a SELECT 1, so the next step's first statement --
+    under its own bound -- is not the one left waiting on it. The caller's
+    own cancellation is re-raised (the statement's task cancelled first)."""
+    if _closed(conn):
+        return False, None
+    in_tx = _in_transaction(conn)
+    if in_tx:
+        if was_in_tx:
+            return False, None          # the caller's transaction: not ours
+        stmt = "ROLLBACK"
+    elif after_cut and _cancelling(conn):
+        stmt = "SELECT 1"
+    else:
+        return False, None
+    task = asyncio.ensure_future(conn.execute(stmt))
     try:
-        async with asyncio.timeout(CONNECTION_RESET_TIMEOUT_S):
-            if _in_transaction(conn) and not was_in_tx:
-                await conn.execute("ROLLBACK")
-                ended = True
+        done, _ = await asyncio.wait({task}, timeout=CONNECTION_RESET_TIMEOUT_S)
     except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_retrieve)
         raise
-    except Exception as exc:                                   # noqa: BLE001
-        return ended, "%s: %s" % (type(exc).__name__, str(exc)[:160])
-    return ended, None
+    if task in done:
+        if task.cancelled():
+            return False, ("CancelledError: the %s after the %s was cancelled"
+                           % (stmt, "cut" if after_cut else "step"))
+        exc = task.exception()
+        if exc is None:
+            return in_tx, None
+        return False, "%s: %s" % (type(exc).__name__, str(exc)[:160])
+    # NOT ANSWERED WITHIN THE BOUND: the connection is unusable for the time
+    # the pass has left; it is terminated deliberately (never cancelled into
+    # a state asyncpg cannot recover from) and named. run_once ends its
+    # backend and writes the record on a fresh connection.
+    pid = connection_identity(conn)["backend_pid"]
+    terminated = _terminate_quietly(conn)
+    task.cancel()
+    task.add_done_callback(_retrieve)
+    return False, (
+        "%s: the %s after the %s (the server's acknowledgement of the "
+        "cancelled statement) did not return within %.1fs; the pass "
+        "connection was %s (backend pid %s) -- the pass is recorded on a "
+        "fresh connection" % (
+            R_CONNECTION_RESET_TIMED_OUT, stmt,
+            "cut" if after_cut else "step", float(CONNECTION_RESET_TIMEOUT_S),
+            "terminated" if terminated else "already closed", pid))
 
 
 async def _reset_after_cut(conn, *, was_in_tx: bool) -> str | None:
     """Put the pass connection back after a step was cancelled: a transaction
     the step opened and did not close is rolled back (asyncpg has already
-    cancelled the statement). A transaction the CALLER held before the pass
+    cancelled the statement; the ROLLBACK, or a SELECT 1 outside a
+    transaction, waits out the server's acknowledgement -- bounded, see
+    _end_open_transaction). A transaction the CALLER held before the pass
     is not the pass's to end. None when clean, else the problem, by name."""
-    return (await _end_open_transaction(conn, was_in_tx=was_in_tx))[1]
+    return (await _end_open_transaction(conn, was_in_tx=was_in_tx,
+                                        after_cut=True))[1]
 
 
 def _returned_error(name: str, result) -> str | None:
@@ -650,15 +840,19 @@ async def paper_pass(conn, *, now: float | None = None,
             # THE LOCK IS RELEASED ON EVERY EXIT: a transaction the pass left
             # open (a cut step) would make the unlock fail ("current
             # transaction is aborted") and keep the lock for as long as this
-            # pooled connection lives, so it is ended first
+            # pooled connection lives, so it is ended first. On a CLOSED
+            # connection neither can run: the lock goes with the backend,
+            # which run_once ends (reap_backend) if it has not exited.
             try:
-                if _in_transaction(conn) and not was_in_tx:
+                if not _closed(conn) and _in_transaction(conn) \
+                        and not was_in_tx:
                     await conn.execute("ROLLBACK")
             except Exception:                                  # noqa: BLE001
                 pass
             try:
-                await conn.execute("SELECT pg_advisory_unlock($1)",
-                                   ADVISORY_LOCK_KEY)
+                if not _closed(conn):
+                    await conn.execute("SELECT pg_advisory_unlock($1)",
+                                       ADVISORY_LOCK_KEY)
             except Exception:                                  # noqa: BLE001
                 pass
 
@@ -669,6 +863,17 @@ def _skipped(out: dict, name: str, *, left: float) -> None:
     out["skipped_steps"][name] = R_STEP_SKIPPED
     out["errors"][name] = "%s: %.1fs of pass time left for steps" % (
         R_STEP_SKIPPED, max(0.0, left))
+
+
+def _skipped_connection_closed(out: dict, name: str) -> None:
+    """A step not started because the pass connection is CLOSED (terminated
+    after a cut the server did not acknowledge in time, or by paper_derek):
+    named, in `skipped_steps` and in `errors`, instead of being started
+    against a dead connection (a step's venue reads would run, and nothing
+    it did could be recorded)."""
+    out["skipped_steps"][name] = R_STEP_SKIPPED_CONNECTION_CLOSED
+    out["errors"][name] = ("%s: the pass connection was closed before the "
+                           "step started" % R_STEP_SKIPPED_CONNECTION_CLOSED)
 
 
 def _not_started_enter_overrun(out: dict, name: str, *, left: float,
@@ -763,6 +968,9 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
     for item in (steps if steps is not None else default_steps()):
         name, fn = (item if isinstance(item, tuple)
                     else (getattr(item, "__name__", "step"), item))
+        if _closed(conn):
+            _skipped_connection_closed(out, name)
+            continue
         left = steps_end - time.monotonic()
         if left < STEP_MIN_START_S:
             _skipped(out, name, left=left)
@@ -854,6 +1062,23 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
     for k in ("decisions_recorded", "orders_submitted", "reviews"):
         out[k] = sum(int((v or {}).get(k) or 0)
                      for v in out["steps"].values() if isinstance(v, dict))
+    record = {"session_id": sess["session_id"], "now": at,
+              "mutation_attempts": attempts,
+              "last_mutation_attempt": getattr(md, "last_mutation_attempt",
+                                               None)}
+    if _closed(conn):
+        # THE PASS CONNECTION IS CLOSED (terminated by the pass after a cut
+        # the server did not acknowledge within CONNECTION_RESET_TIMEOUT_S,
+        # by paper_derek for an owed sequence that outlived its bounds, or
+        # lost): the record cannot be written on it. It is NOT dropped:
+        # run_once writes it, and the heartbeat, on a fresh pool connection
+        # once this connection's backend is ended (R_RECORDED_ON_A_FRESH_
+        # CONNECTION, with what became of the backend).
+        out["record_pending"] = record
+        out["errors"]["PASS_CONNECTION"] = (
+            "%s: the pass connection was closed before the record"
+            % R_RECORDED_ON_A_FRESH_CONNECTION)
+        return out
     # THE RECORD: paper_session_health, bounded by what is left of the hard
     # timeout (less the lock release) -- a record that hangs is a named
     # HEALTH error on a pass that still returns, and so still writes its
@@ -863,18 +1088,21 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
                           - time.monotonic() - LOCK_RELEASE_MARGIN_S)
         async with asyncio.timeout(record_room):
             await S.record_pass(
-                conn, sess["session_id"], result=_digest(out), now=at,
+                conn, record["session_id"], result=_digest(out), now=at,
                 mutation_attempts=attempts,
-                last_mutation_attempt=getattr(md, "last_mutation_attempt",
-                                              None),
-                error=("; ".join("%s=%s" % kv
-                                 for kv in out["errors"].items())
-                       [:500] or None))
+                last_mutation_attempt=record["last_mutation_attempt"],
+                error=_record_error(out))
     except asyncio.CancelledError:
         raise
     except Exception as exc:                                   # noqa: BLE001
         out["errors"]["HEALTH"] = type(exc).__name__
     return out
+
+
+def _record_error(out: dict) -> str | None:
+    """paper_session_health.last_error: every pass error, by name."""
+    return ("; ".join("%s=%s" % kv for kv in (out.get("errors") or {}).items())
+            [:500] or None)
 
 
 def _digest(out: dict) -> dict:
@@ -884,7 +1112,7 @@ def _digest(out: dict) -> dict:
         "decisions_recorded", "orders_submitted", "reviews",
         "mutation_attempts", "elapsed_s", "step_elapsed_s",
         "held_in_pass", "skipped_steps", "exceeded_step",
-        "pass_time")} | {
+        "pass_time", "pass_connection")} | {
         "steps": {k: (v if not isinstance(v, dict) else
                       {kk: vv for kk, vv in v.items()
                        if not isinstance(vv, (list, dict))})
@@ -948,37 +1176,238 @@ def _heartbeat_body(res: dict) -> str:
                         "written_at": time.time()}, default=str)
 
 
+async def _heartbeat_write(conn, res: dict) -> None:
+    """The heartbeat's write; raises what the connection raises."""
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        HEARTBEAT_KEY, _heartbeat_body(res))
+
+
 async def write_heartbeat(conn, res: dict) -> None:
     try:
-        await conn.execute(
-            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
-            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-            HEARTBEAT_KEY, _heartbeat_body(res))
+        await _heartbeat_write(conn, res)
     except Exception:                                          # noqa: BLE001
         pass
 
 
+def _cancelled_by_the_caller() -> bool:
+    """Whether the CancelledError in flight is the current task's own
+    cancellation (the caller -- the scheduler shutting down, an enclosing
+    timeout -- asked for it: asyncio's task.cancelling() counts the
+    requests) rather than one raised by an await on a future that was
+    cancelled underneath the task (asyncpg's cancel-acknowledgement future
+    after a bound cut the statement waiting on it). Without task.cancelling
+    (Python < 3.11) every CancelledError is the caller's, as before."""
+    task = asyncio.current_task()
+    cancelling = getattr(task, "cancelling", None)
+    if cancelling is None:
+        return True
+    try:
+        return int(cancelling()) > 0
+    except Exception:                                          # noqa: BLE001
+        return True
+
+
+#: the pass connection's backend, ended from a fresh connection: ours by
+#: pid AND database AND (when known) client port, never another's
+REAP_BACKEND_SQL = """
+    SELECT pid, state, pg_terminate_backend(pid) AS signalled
+      FROM pg_stat_activity
+     WHERE pid = $1 AND datname = current_database()
+       AND pid <> pg_backend_pid()
+       AND ($2::int IS NULL OR client_port = $2)
+"""
+BACKEND_PRESENT_SQL = ("SELECT count(*) FROM pg_stat_activity WHERE pid = $1 "
+                       "AND datname = current_database()")
+
+
+async def reap_backend(conn, ident: dict, *,
+                       exit_wait_s: float | None = None) -> dict:
+    """END THE BACKEND OF A CLOSED CONNECTION, from `conn` (a fresh one), by
+    the identity read at acquire (`connection_identity`). A backend whose
+    client is gone keeps running its statement to the end -- holding the
+    session's advisory locks, since a backend that writes nothing never
+    notices (client_connection_check_interval 0) -- unless the CancelRequest
+    reached it; terminated, it exits and its session-level advisory locks
+    are released server-side (what frees the pass lock). Waits, bounded by
+    `exit_wait_s` (BACKEND_EXIT_WAIT_S), for the backend to be gone. Returns
+    the outcome by name: BACKEND_PID_UNKNOWN (no pid to end), BACKEND_
+    ALREADY_GONE (it had exited: the cancel reached it, or it noticed),
+    BACKEND_TERMINATED (signalled; `gone` says whether it exited within
+    the wait), BACKEND_TERMINATE_REFUSED (the server would not signal it).
+    Raises what the statement raises (the caller bounds and names it)."""
+    pid = ident.get("backend_pid")
+    if not pid:
+        return {"outcome": "BACKEND_PID_UNKNOWN"}
+    port = ident.get("client_port")
+    rows = await conn.fetch(REAP_BACKEND_SQL, int(pid),
+                            int(port) if port is not None else None)
+    if not rows:
+        return {"outcome": "BACKEND_ALREADY_GONE", "pid": int(pid)}
+    r = rows[0]
+    out = {"outcome": ("BACKEND_TERMINATED" if r["signalled"]
+                       else "BACKEND_TERMINATE_REFUSED"),
+           "pid": int(pid), "state": r["state"], "gone": False}
+    if not r["signalled"]:
+        return out
+    wait = float(BACKEND_EXIT_WAIT_S if exit_wait_s is None else exit_wait_s)
+    end = time.monotonic() + wait
+    t0 = time.monotonic()
+    while True:
+        if not await conn.fetchval(BACKEND_PRESENT_SQL, int(pid)):
+            out["gone"] = True
+            out["exit_s"] = round(time.monotonic() - t0, 3)
+            return out
+        if time.monotonic() >= end:
+            return out
+        await asyncio.sleep(0.05)
+
+
+def _who_closed(res: dict, pid, *, hint: str | None) -> str:
+    """What ended the pass connection, by what the pass recorded."""
+    if hint:
+        return hint
+    reset = (res.get("errors") or {}).get("CONNECTION_RESET") or ""
+    if R_CONNECTION_RESET_TIMED_OUT in str(reset):
+        return ("terminated by the pass: %s" % R_CONNECTION_RESET_TIMED_OUT)
+    try:
+        from . import paper_derek as _PD
+        t = _PD.last_termination(pid)
+    except Exception:                                          # noqa: BLE001
+        t = None
+    if t:
+        sent = t.get("cancel_sent")
+        return ("terminated by paper_derek for an owed ENTER's sequence that "
+                "outlived its bounds (its cancel request %s)" % (
+                    "sent" if sent else
+                    "NOT sent: lost at the terminate" if sent is False else
+                    "not in flight"))
+    return "closed by the server or the pool, not by the pass"
+
+
+async def _record_on_a_fresh_connection(pool, res: dict, ident: dict, *,
+                                        hint: str | None = None) -> None:
+    """THE PASS CONNECTION ENDED CLOSED: end its backend and write the pass
+    record and the heartbeat on a FRESH pool connection (RC6.3d), bounded
+    as a whole by CLOSED_CONNECTION_RECORD_TIMEOUT_S; never raises (the
+    caller's own cancellation excepted). `res["record_pending"]` (set by
+    the pass when it could not write paper_session_health) is written; a
+    pass that did not run (ran=False) gets its heartbeat only, as always.
+    What happened is on the record: errors.PASS_CONNECTION names
+    R_RECORDED_ON_A_FRESH_CONNECTION with what ended the connection and
+    what became of its backend; `pass_connection` carries the detail."""
+    pid = ident.get("backend_pid")
+    note: dict[str, Any] = {
+        "closed": True, "backend_pid": pid,
+        "client_port": ident.get("client_port"),
+        "closed_by": _who_closed(res, pid, hint=hint),
+        "reap": None, "recorded": None, "heartbeat": False}
+    res["pass_connection"] = note
+    pending = res.pop("record_pending", None)
+    errors = res.setdefault("errors", {})
+    try:
+        async with asyncio.timeout(CLOSED_CONNECTION_RECORD_TIMEOUT_S):
+            async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as fresh:
+                try:
+                    note["reap"] = await reap_backend(fresh, ident)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:                       # noqa: BLE001
+                    note["reap"] = {
+                        "outcome": "BACKEND_TERMINATE_FAILED",
+                        "error": "%s: %s" % (type(exc).__name__,
+                                             str(exc)[:160])}
+                reap = note["reap"] or {}
+                errors["PASS_CONNECTION"] = (
+                    "%s: the pass connection (backend pid %s) was closed "
+                    "before the record: %s; its backend: %s%s; "
+                    "paper_session_health and the heartbeat written on a "
+                    "fresh connection" % (
+                        R_RECORDED_ON_A_FRESH_CONNECTION, pid,
+                        note["closed_by"], reap.get("outcome"),
+                        (" (exited in %.3fs)" % reap["exit_s"]
+                         if reap.get("gone") and "exit_s" in reap else
+                         " (NOT gone within %.1fs)" % BACKEND_EXIT_WAIT_S
+                         if reap.get("outcome") == "BACKEND_TERMINATED"
+                         else "")))
+                if pending:
+                    await S.record_pass(
+                        fresh, pending["session_id"], result=_digest(res),
+                        now=pending["now"],
+                        mutation_attempts=pending["mutation_attempts"],
+                        last_mutation_attempt=pending["last_mutation_attempt"],
+                        error=_record_error(res))
+                    note["recorded"] = True
+                await _heartbeat_write(fresh, res)
+                note["heartbeat"] = True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        note["failed"] = "%s: %s" % (type(exc).__name__, str(exc)[:160])
+        if pending and not note.get("recorded"):
+            errors["HEALTH"] = type(exc).__name__
+
+
 async def run_once(get_pool, *, trigger: str, now: float | None = None,
                    **kw) -> dict:
-    """ONE PASS ON ITS OWN CONNECTION, bounded; never raises.
+    """ONE PASS ON ITS OWN CONNECTION, bounded; never raises (the caller's
+    own cancellation excepted: it always propagates).
 
     HARD_TIMEOUT_S is the last resort. Since RC6.3b every step is bounded
     inside it (paper_pass), so a pass that reaches it again was held by
     something outside the steps; its heartbeat now says which step was in
-    flight and which had ended, instead of an empty "TimeoutError: "."""
+    flight and which had ended, instead of an empty "TimeoutError: ".
+
+    THE PASS CONNECTION MAY END CLOSED (RC6.3d): terminated by the pass
+    after a cut the server did not acknowledge in time, or by paper_derek
+    for an owed sequence that outlived its bounds. Then its backend is
+    ENDED and the record and heartbeat are written on a FRESH pool
+    connection (_record_on_a_fresh_connection) -- an orphaned backend
+    would otherwise hold the pass's advisory lock for the rest of its
+    statement. A CancelledError the caller did not ask for (a statement
+    waited on asyncpg's cancel acknowledgement and that wait was cancelled)
+    is recorded by name on a fresh connection, never propagated as a
+    silent unrecorded pass."""
     progress = kw.pop("progress", None)
     if progress is None:
         progress = {}
     try:
         pool = await get_pool()
         async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
+            ident = connection_identity(conn)
+            hint = None
             try:
                 res = await asyncio.wait_for(
                     paper_pass(conn, now=now, trigger=trigger,
                                progress=progress, **kw),
                     HARD_TIMEOUT_S)
             except asyncio.CancelledError:
-                raise
+                if _cancelled_by_the_caller():
+                    raise
+                # NOT THE CALLER'S: raised by an await on a future cancelled
+                # underneath the pass (asyncpg's acknowledgement future for
+                # a cut statement), so the connection raises it on every
+                # statement until the server answers. Named, never silent;
+                # the connection is terminated (nothing can run on it) and
+                # the heartbeat is written on a fresh one.
+                res = {"ran": False, "trigger": trigger,
+                       "refusal": "PAPER_PASS_RAISED_OR_TIMED_OUT",
+                       "why": "%s%s" % (
+                           "CancelledError not requested by the caller: a "
+                           "statement of the pass awaited asyncpg's "
+                           "acknowledgement of a cancelled statement and "
+                           "that wait was cancelled; the pass connection is "
+                           "terminated and this heartbeat written on a fresh "
+                           "connection",
+                           (" in step %s" % progress["step"])
+                           if progress.get("step") else ""),
+                       "in_step": progress.get("step"),
+                       "steps_ended": list(progress.get("steps_ended")
+                                           or [])}
+                _terminate_quietly(conn)
+                hint = ("terminated by run_once: a CancelledError the caller "
+                        "did not request")
             except Exception as exc:                           # noqa: BLE001
                 said = str(exc)[:200] or (
                     "the pass was cut by HARD_TIMEOUT_S (%.0f s)"
@@ -993,7 +1422,11 @@ async def run_once(get_pool, *, trigger: str, now: float | None = None,
                        "in_step": progress.get("step"),
                        "steps_ended": list(progress.get("steps_ended")
                                            or [])}
-            await write_heartbeat(conn, res)
+            if _closed(conn):
+                await _record_on_a_fresh_connection(pool, res, ident,
+                                                    hint=hint)
+            else:
+                await write_heartbeat(conn, res)
             _TASK["last"] = res
             return res
     except asyncio.CancelledError:
@@ -2283,7 +2716,7 @@ async def _bounded_checkpoint(conn, ctx: dict, out: dict,
     the scheduler retries or drops them -- the cut is named on
     held_in_pass.errors, and the connection is put back. Never raises
     (CancelledError excepted)."""
-    if not _HELD.get("pending"):
+    if not _HELD.get("pending") or _closed(conn):
         return
     room = steps_end - time.monotonic()
     t_cp = time.monotonic()

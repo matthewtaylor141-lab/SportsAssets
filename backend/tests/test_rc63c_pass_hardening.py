@@ -571,10 +571,19 @@ async def _real_pass_with_a_hung_allie_read(monkeypatch, *, tag, hard,
                    "SELECT subject, detail FROM paper_audrey_findings WHERE "
                    "account_id=$1 AND kind=$2", acct["account_id"],
                    PD.F_ENTER_ORDER_ABANDONED),
+               # (rc6.3d T1) scoped to THIS test database: the independent
+               # race review proved the unscoped probe counted a hung Allie
+               # read in ANOTHER database on the same server (another agent's
+               # concurrent run of this file), reading active_hang==1 when
+               # this pass's own statement was already gone. datname =
+               # current_database() tightens the assertion -- a statement in
+               # another database can never be this pass's -- it never
+               # loosens it.
                "active_hang": await conn.fetchval(
                    "SELECT count(*) FROM pg_stat_activity WHERE "
                    "state='active' AND query LIKE '%ph-allie-hang%' AND "
-                   "pid <> pg_backend_pid()")}
+                   "pid <> pg_backend_pid() AND "
+                   "datname = current_database()")}
         return out
     finally:
         await _clean_allie_inputs(conn)
