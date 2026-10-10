@@ -174,8 +174,21 @@ with those re-adds spent (MAX_READDS_PER_MARKET) the session ends
 (ReplyTimeout, R_REPLY_TIMEOUT: fail closed, the reconnect subscribes
 afresh). A market dropped and wanted again before its delete went out is
 asked for by get_snapshot only while the venue holds it; otherwise it is
-added again. Bounded: the re-add budgets, the command rate and the
-per-market get_snapshot bounds.
+added again. (Round 3) A delete the venue REFUSES (an error: error 27 is
+documented for any command on the subscription) leaves the market held: a
+market wanted again after that is asked for by get_snapshot (an add would
+be "no action", no snapshot), one still dropped is deleted again
+RATE_LIMIT_RETRY_S later (MAX_RATE_LIMIT_RETRIES a session). A market the
+venue may hold although no reply said so (an add of it whose reply was
+taken as lost) that a refusal then names is re-added ALONE: error 26 refuses
+a whole command for one market, and an add of a held market alone is "no
+action", answered by `ok` with the full list (it used to stay GAP, not
+held, while the venue streamed it). A market dropped and wanted again
+while its add was in flight is asked for by get_snapshot when the reply
+confirms it, never left waiting on the add's own snapshot (it is not bound
+to the sid, so a gap could not name it if that snapshot were lost).
+Bounded: the re-add budgets, the command rate and the per-market
+get_snapshot bounds.
 
 SNAPSHOTS ARE IN THE SEQUENCE TOO (RC6 red-team, replay). Kalshi: seq is
 "used for snapshot/delta consistency". A replayed or out-of-order snapshot
@@ -1002,7 +1015,11 @@ class WsBooks:
             return                  # served here, or on another live sid
         if t in a["awaiting"]:
             return
-        if seen or exp != cid:
+        # (round 3) a market not bound to the sid -- dropped and wanted
+        # again while this add was in flight -- does not wait on the add's
+        # own snapshot: a gap could not name it if that snapshot were lost
+        # (get_snapshot binds it when sent)
+        if seen or exp != cid or t not in self.sid_markets.get(sid, ()):
             self.recover.setdefault(sid, set()).add(t)
 
     def _refuse(self, a, sid, t, code) -> None:
@@ -1093,6 +1110,12 @@ class WsBooks:
         # the venue may hold t already (the lost reply an `ok`): the re-add
         # may be "no action", with no snapshot of its own to wait for
         a["unsure"].add(t)
+
+    def unsure(self, sid, t) -> bool:
+        """(round 3) May the venue hold t on `sid` although no reply said so
+        (the reply to an add of it was taken as lost)?"""
+        a = self.anchors.get(sid)
+        return a is not None and not a["ended"] and t in a["unsure"]
 
     def held(self, sid, t) -> bool:
         """Does the venue hold t on the live acknowledged `sid` (its replies
@@ -1870,6 +1893,19 @@ class Subscriber:
         #: (RC6.2 review) add / delete command id -> when it was sent (its
         #: reply's timeout, REPLY_TIMEOUT_S)
         self.sent_at: dict = {}
+        #: (RC6.2 review, round 3) delete_markets id -> the markets it named
+        #: (until the venue answers it); a market whose delete the venue
+        #: refused while it is still dropped -> when its delete is sent
+        #: again (RATE_LIMIT_RETRY_S later, at most MAX_RATE_LIMIT_RETRIES
+        #: times a session: delete_retries)
+        self.deleting: dict = {}
+        self.delete_retry: dict = {}
+        self.delete_retries: dict = {}
+        #: (round 3) markets to re-add ALONE: refused while the reply to an
+        #: earlier add of them may have been lost (the venue may hold them;
+        #: a refusal of the whole command -- error 26 -- for another market
+        #: named with them hid it)
+        self.solo_readd: set = set()
         self._w_obj, self._w_len, self._w_ver, self._w_frames = \
             None, -1, -1, 0
 
@@ -1916,6 +1952,7 @@ class Subscriber:
         self.queued_add = [t for t in self.queued_add if t not in gone]
         self.rewant = [t for t in self.rewant if t not in gone]
         self.readd = [t for t in self.readd if t not in gone]
+        self.solo_readd.difference_update(gone)
         for t in gone:
             self.rate_retry.pop(t, None)
         return held
@@ -1992,10 +2029,19 @@ class Subscriber:
             self.books.want(fresh)
             self.subscribed.update(fresh)
             for t in fresh:
+                self.delete_retry.pop(t, None)
                 if t in self.queued_delete:
                     # dropped and wanted again before its delete went out:
                     # the venue still holds it; only its snapshot is needed
                     self.queued_delete.discard(t)
+                    self.rewant.append(t)
+                elif self.sid is not None and self.books.held(self.sid, t):
+                    # (RC6.2 review, round 3) dropped and wanted again after
+                    # the venue REFUSED its delete: the venue holds it by its
+                    # own replies, so an add would be "no action" with no
+                    # snapshot (the book waited for ever) -- its snapshot is
+                    # asked for; a later drop deletes it again
+                    self.on_venue.setdefault(t, 0)
                     self.rewant.append(t)
                 else:
                     self.queued_add.append(t)
@@ -2032,6 +2078,17 @@ class Subscriber:
         if sid is not None and self.sent_at:
             self._reply_timeouts(sid)
         if sid is not None:
+            if self.delete_retry:
+                # (round 3) a refused delete, sent again once due -- only
+                # while the market is still dropped and the venue holds it
+                now = self.clock()
+                for t in sorted(self.delete_retry):
+                    if self.delete_retry[t] <= now:
+                        del self.delete_retry[t]
+                        if (t not in self.books.books or
+                                t in self.books.forgotten) and \
+                                self.books.held(sid, t):
+                            self.queued_delete.add(t)
             if self.queued_delete:
                 ts = sorted(self.queued_delete)
                 self.queued_delete = set()
@@ -2039,6 +2096,9 @@ class Subscriber:
                     cmd = self.cmd.update_subscription(sid, "delete_markets",
                                                        c)
                     self.pending[cmd["id"]] = []
+                    self.deleting[cmd["id"]] = list(c)
+                    while len(self.deleting) > MAX_CMD_INDEX:
+                        self.deleting.pop(next(iter(self.deleting)))
                     for t in c:
                         self.on_venue.pop(t, None)
                     await self._send(ws, cmd, sid)
@@ -2051,10 +2111,20 @@ class Subscriber:
                         if t in self.books.books and \
                                 t not in self.books.forgotten:
                             self.readd.append(t)
+                            if self.books.unsure(sid, t):
+                                self.solo_readd.add(t)
             adds = sorted(set(self.queued_add) | set(self.readd)) if (
                 self.queued_add or self.readd) else ()
             self.queued_add, self.readd = [], []
-            for c in chunks(adds):
+            # (round 3) a market the venue may hold already (an add's reply
+            # taken as lost) that was refused goes ALONE: an add of a market
+            # held is "no action", answered by `ok` with the full list -- a
+            # refusal of the whole command for another market (error 26, the
+            # market limit) can no longer hide that the venue holds it
+            solo = [t for t in adds if t in self.solo_readd]
+            self.solo_readd.difference_update(solo)
+            rest = [t for t in adds if t not in solo]
+            for c in [[t] for t in solo] + list(chunks(rest)):
                 # a drop during an earlier send in this burst
                 c = [t for t in c if t not in self.books.forgotten
                      and t in self.books.books]
@@ -2126,6 +2196,7 @@ class Subscriber:
         if typ == "ok":
             if type(cid) is int:
                 self.pending.pop(cid, None)
+                self.deleting.pop(cid, None)
         elif typ == "error" and type(cid) is int:
             self._refused(cid, m)
         elif out == "SNAPSHOT":
@@ -2166,6 +2237,10 @@ class Subscriber:
             if n < 1:
                 self.readds[t] = n + 1
                 self.readd.append(t)
+                if self.books.unsure(self.sid, t):
+                    # (round 3) the venue may hold it already: re-added
+                    # alone (see _commands)
+                    self.solo_readd.add(t)
             elif mine[t] == RATE_LIMIT_ERROR and \
                     self.rate_retries.get(t, 0) < MAX_RATE_LIMIT_RETRIES:
                 self.rate_retries[t] = self.rate_retries.get(t, 0) + 1
@@ -2205,7 +2280,8 @@ class Subscriber:
     def next_due(self):
         """(RC6.2 review) When the session next acts with nothing read (a
         rate-limit retry, a reply's timeout), or None."""
-        due = list(self.rate_retry.values())
+        due = list(self.rate_retry.values()) + list(
+            self.delete_retry.values())
         if self.sid is not None:
             open_ = self.books.unanswered(self.sid)
             due += [at + REPLY_TIMEOUT_S for cid, at in self.sent_at.items()
@@ -2220,14 +2296,44 @@ class Subscriber:
         -- they are asked again (bounded: the per-market and plane-hang
         bounds end the session past their limits)."""
         named = self.pending.pop(cid, None) or []
+        dels = self.deleting.pop(cid, None) or []
         kind = self.cmd_kind.get(cid)
         code = (m.get("msg") or {}).get("code")
-        if self.sid is None or code in TERMINAL_ERROR_CODES or not named:
+        if self.sid is None or code in TERMINAL_ERROR_CODES:
+            return
+        if kind == "delete_markets" and dels:
+            self._delete_refused(dels)
+            return
+        if not named:
             return
         if kind == "get_snapshot":
             self.books.unrequest(self.sid, [
                 t for t in named if t in self.books.books
                 and t not in self.books.forgotten])
+
+    def _delete_refused(self, tickers) -> None:
+        """(RC6.2 review, round 3) Our delete_markets answered by an error
+        (27, the per-subscription command rate, or any other refusal): the
+        venue still holds the markets -- an error leaves it as it was
+        (WsBooks._settle). A market wanted again meanwhile is the venue's
+        already: its snapshot is asked for (the reply's confirmation, or the
+        wanted-set step finding it held). One still dropped is deleted again
+        RATE_LIMIT_RETRY_S later (a retry inside the same rate window would
+        be refused again), at most MAX_RATE_LIMIT_RETRIES times a session;
+        never a loop (each refusal schedules at most one retry). It used to
+        stay on the venue for the rest of the session, and when wanted again
+        its add was "no action": no snapshot, the book waited for ever."""
+        now = self.clock()
+        for t in tickers:
+            if t in self.books.books and t not in self.books.forgotten:
+                continue
+            if not self.books.held(self.sid, t):
+                continue
+            n = self.delete_retries.get(t, 0)
+            if n >= MAX_RATE_LIMIT_RETRIES:
+                continue
+            self.delete_retries[t] = n + 1
+            self.delete_retry[t] = now + RATE_LIMIT_RETRY_S
 
     async def _drain_gaps(self) -> None:
         if not self.books.left_current:
