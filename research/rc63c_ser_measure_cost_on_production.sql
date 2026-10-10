@@ -91,7 +91,7 @@ EXPLAIN (ANALYZE, BUFFERS)
      ORDER BY us_market_slug, decided_at DESC
      LIMIT 20000;
 
-\echo == 5. the component's recent verdicts on production intents (last 48 h)
+\echo == 5. the component verdicts recorded on production intents (last 48 h)
 SELECT evidence->'settlement_exception_risk'->>'status' AS status,
        left(evidence->'settlement_exception_risk'->>'why', 60) AS why,
        count(*) AS intents, min(created_at) AS first_at, max(created_at) AS last_at
