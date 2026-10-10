@@ -15,7 +15,9 @@ accounting lenses, A6 and the profitability runner probe):
   economics and PAPER capital were the archive's;
 - revenue_improvements.propose_due read revenue reliability for
   L.ACCOUNT_ID;
-- live_game_state's PostgresStore.fixtures defaulted to paper_acct_main.
+- live_game_state's PostgresStore.fixtures defaulted to paper_acct_main;
+- the opportunity funnel (GET /api/command/opportunity-funnel) read the
+  decisions of profitability.common.PAPER_ACCOUNT.
 
 Each now resolves the durable PAPER selector (simulated_account_context.
 selected_account) unless the caller supplies an account. ALL DATA SYNTHETIC;
@@ -286,3 +288,36 @@ async def test_live_game_fixtures_default_to_the_selected_account(conn):
     assert proxy.args == [(r['account_id'],)]
     await PostgresStore(Pool()).fixtures(account_id=L.ACCOUNT_ID)
     assert proxy.args[-1] == (L.ACCOUNT_ID,)
+
+
+async def test_opportunity_funnel_reads_the_selected_accounts_decisions(conn):
+    """GET /api/command/opportunity-funnel read the decisions of
+    profitability.common.PAPER_ACCOUNT (paper_acct_main) whatever the
+    selector said; it now reads the selected account's."""
+    from sportsassets.api import command_opportunity_funnel as API
+    from sportsassets.profitability import common as PC
+
+    class Spy:
+        def __init__(self, c):
+            self.c, self.accounts = c, []
+
+        def __getattr__(self, name):
+            return getattr(self.c, name)
+
+        async def fetch(self, sql, *args):
+            if sql == API.DECISIONS_SQL:
+                self.accounts.append(args[0])
+            return await self.c.fetch(sql, *args)
+
+    spy = Spy(conn)
+    sleeve = sorted(set(PC.STRATEGY_SLEEVE.values()))[0]
+    before = await API._read(spy, sleeve=sleeve, strategy=None, hours=1.0,
+                             now=time.time())
+    assert spy.accounts == [L.ACCOUNT_ID]
+    r = await _activate(conn, 'rc63-funnel')
+    after = await API._read(spy, sleeve=sleeve, strategy=None, hours=1.0,
+                            now=time.time())
+    assert spy.accounts == [L.ACCOUNT_ID, r['account_id']]
+    # the read names the account it read
+    assert before['data']['window']['account_id'] == L.ACCOUNT_ID
+    assert after['data']['window']['account_id'] == r['account_id']

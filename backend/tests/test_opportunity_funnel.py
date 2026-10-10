@@ -640,6 +640,14 @@ async def test_the_funnel_over_decisions_the_real_writer_recorded(
             sorted(set(recorded) - set(slugs.values()))
 
         monkeypatch.setattr(C, "PAPER_ACCOUNT", acct["account_id"])
+        # (rc6.3 pr5-port) the route reads the SELECTED PAPER account
+        # (simulated_account_context.selected_account): the harness account
+        # stands in for it here; every assertion below is unchanged
+        from sportsassets import simulated_account_context as SAC
+
+        async def _selected(_conn):
+            return acct["account_id"]
+        monkeypatch.setattr(SAC, "selected_account", _selected)
         dec_at = [r["t"] for r in await conn.fetch(
             "SELECT extract(epoch FROM decided_at)::float8 AS t "
             "  FROM paper_decisions WHERE session_id = $1", acct["session_id"])]

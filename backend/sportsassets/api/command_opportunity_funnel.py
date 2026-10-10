@@ -14,7 +14,8 @@ last"; near misses and missed executable EV at the strategy's own executable
 book freshness (profitability/opportunity_funnel.py has the rule).
 
 READS (SELECT only, one READ ONLY transaction under a statement timeout):
-  * paper_decisions of the paper account in the window, for the sleeve's
+  * paper_decisions of the SELECTED paper account (migration 317's
+    selector; `window.account_id` names it) in the window, for the sleeve's
     strategies (newest first, bounded by MAX_ROWS; `truncated` says so);
   * paper_book_observations: each evaluated decision's own readable book,
     else the latest error-free observation of its market at or before the
@@ -201,8 +202,13 @@ async def _read(conn, *, sleeve: str, strategy, hours: float,
                 "SELECT to_regclass('paper_decisions') IS NOT NULL"):
             return {"status": "UNAVAILABLE", "data": None,
                     "why": "PAPER_DECISIONS_NOT_PRESENT"}
+        # the SELECTED PAPER account (migration 317's durable selector; the
+        # legacy main account before any epoch); an unreadable selector
+        # raises and the route answers UNAVAILABLE with its reason
+        from ..simulated_account_context import selected_account
+        account = await selected_account(conn)
         rows = [_row(r) for r in await conn.fetch(
-            DECISIONS_SQL, C.PAPER_ACCOUNT, start, now, names, negate,
+            DECISIONS_SQL, account, start, now, names, negate,
             MAX_ROWS)]
         chosen = choose_for_ev(rows)
         books = await _books(conn, [r for r in rows
@@ -235,6 +241,7 @@ async def _read(conn, *, sleeve: str, strategy, hours: float,
     return {"status": "OK", "why": None, "data": {
         "version": FN.VERSION,
         "window": {"hours": hours, "start": start, "end": now,
+                   "account_id": account,
                    "rows_read": len(rows), "max_rows": MAX_ROWS,
                    "truncated": len(rows) >= MAX_ROWS,
                    "truncated_means": ("the window holds more decisions than "

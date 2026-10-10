@@ -83,8 +83,8 @@ archived account, and accounts outside the family are never touched.
 The agents' research queue (task specs, flow IDs, source-context checks,
 claims, its control row and heartbeat), its Slack review posts and its loop
 health source, the scheduled profitability research cycle, Audrey's
-revenue-reliability proposals and the live-game display's held fixtures also
-resolve the selected account. A newly selected epoch's research control row
+revenue-reliability proposals, the live-game display's held fixtures and the
+opportunity funnel's decision read also resolve the selected account. A newly selected epoch's research control row
 starts from its nearest ancestor's (the manager's on/off and hourly budget
 carry across the switch). The actual-execution mirror (SMALL LIVE, SHADOW)
 deliberately stays on `paper_acct_main`: after activation it mirrors no new
