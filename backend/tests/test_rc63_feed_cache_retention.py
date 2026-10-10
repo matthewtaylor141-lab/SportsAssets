@@ -22,13 +22,22 @@ WHAT THIS FILE PINS (each fails on the base f971d665, passes here):
       and the codes [NOT_YET_POSTED, PAYLOAD_HAS_NO_PINNACLE_BOOK];
   (b) two MLS kick-offs at one start sharing "United", one posted: the
       unposted one is NOT_YET_POSTED; a shared non-affiliative token
-      ("New York") is a candidate until the record is CLAIMED by the other
-      metered event, then NOT_YET_POSTED only with the claim;
+      ("New York") is a candidate, and stays one under a CLAIM by another
+      metered event unless that event's names prove it another game -- a
+      claim by the asking event itself (re-rendered names), by a second
+      listing of the same game, or by names sharing a real token or an
+      acronym with the asking names covers nothing (independent review of
+      3764b24b: both of the first two read NOT_YET_POSTED, EXTERNAL, for a
+      fixture that IS in the feed);
   (c) an NCAAF slate of 40 games at one start sharing "State";
-  (d) a near tombstone at the same start keeps NO_EXACT (named);
-  (e) a tombstone-ring overflow inside its window keeps the doubt, a
-      counter the ring cannot account for keeps it, and the doubt lifts
-      once the window has passed;
+  (d) a near tombstone at the same start keeps NO_EXACT (named), and a
+      tombstone stands until the retention has passed its fixture's START,
+      not its eviction -- the farthest starts are evicted first and asked
+      about last (the review's probe E: evicted today, asked 96 h later,
+      the base read FEED_HOLDS_NO_FIXTURE);
+  (e) a tombstone-ring overflow keeps the doubt as long as anything it
+      dropped would have stood, a counter the ring cannot account for keeps
+      it, and the doubt lifts once every such window has passed;
   (f) FeedCache(max_events=50) fed 200 events with 10 quiet protected
       fixtures: all 10 survive, the unprotected go first, farthest start
       first, least-recently-touched last;
@@ -55,6 +64,7 @@ import uuid
 import pytest
 
 from sportsassets import bettor_external_shadow as ext
+from sportsassets import collector_coverage as cov
 from sportsassets import coverage_first_loss as CFL
 from sportsassets import pinnapi_census as C
 from sportsassets import pinnapi_feed as F
@@ -170,8 +180,13 @@ def test_the_caps_the_tolerance_the_window_and_the_wide_scan_are_unchanged():
     assert N.NEAR_START_STOP - N.ABSENCE_STOP == {"state", "st", "united",
                                                   "utd", "city"}
     # the ring keeps a tombstone at least the absence window plus the
-    # match tolerance
+    # match tolerance -- plus the 6 h after a start the collector still asks
+    # about a game (collector_coverage.HORIZON_BEHIND_S), since the window
+    # is measured from the fixture's start
     assert F.TOMBSTONE_RETENTION_S >= N.ABSENCE_WINDOW_S + P.START_TOLERANCE_S
+    assert F.TOMBSTONE_RETENTION_S >= (N.ABSENCE_WINDOW_S + cov.HORIZON_BEHIND_S
+                                       + P.START_TOLERANCE_S)
+    assert cov.HORIZON_AHEAD_S == 24 * 3600 and cov.HORIZON_BEHIND_S == 6 * 3600
     assert F.TOMBSTONE_RING >= 4 * F.MAX_EVENTS
     # NO_EXACT is still ours; NOT_YET_POSTED still EXTERNAL
     assert CFL.classify(P.R_NO_EXACT)["class"] == RT.SOFTWARE
@@ -274,12 +289,27 @@ def test_b1_two_kickoffs_sharing_united_the_unposted_one_is_not_yet_posted():
     assert loop.no_pinnacle_codes(why, ev)[0] == P.R_NO_EXACT
 
 
-def test_b2_a_shared_token_record_is_ignored_only_once_another_event_claims_it():
+#: Serie B: the feed's "Operario Ferroviario", the metered provider's
+#: "Operario PR" (pinnapi_names.COMPETITION_RENDERINGS, production pair of
+#: 2026-10-07) -- the one canonical match whose claiming names share no
+#: token with a record's own rendering, so a third club sharing that token
+#: ("Ferroviario AC") is told the record is another game
+SERIE_B = "soccer_brazil_serie_b"
+
+
+def test_b2_a_shared_token_record_is_ignored_only_once_another_game_claims_it():
     """New York City v Toronto is in the feed at the start; New York Red
     Bulls v D.C. United is not. "New York" is a real shared token, so the
-    record is a candidate -- until the metered event New York City FC v
-    Toronto FC matches it one-to-one (canonically): then it is that game
-    and cannot be the Red Bulls' under other names."""
+    record is a candidate. The metered event New York City FC v Toronto FC
+    matches it one-to-one (canonically) and claims it -- but its own names
+    share "New York" with the Red Bulls' too, so the names cannot prove it
+    another game: the record STAYS a candidate and NO_EXACT stays (the
+    first cut of this lane, 3764b24b, called the Red Bulls NOT_YET_POSTED
+    here on that claim alone). The narrowing fires only on a claim whose
+    names could not be the asking game's: Operario PR v Botafogo SP claims
+    the feed's Operario Ferroviario v Botafogo SP, and Ferroviario AC v
+    Fortaleza, sharing "Ferroviario" with the record, is then NOT_YET_POSTED
+    -- the record is provably another game."""
     c = _feed([(2, T, "New York City", "Toronto")])
     unposted = _metered(NYRB, DCU)
     got, why = _select(c, unposted)
@@ -288,46 +318,139 @@ def test_b2_a_shared_token_record_is_ignored_only_once_another_event_claims_it()
         "no_candidate_near_start"] is False
     assert loop.no_pinnacle_codes(why, unposted)[0] == P.R_NO_EXACT
     # the posted game is asked for (the same cycle): an exact one-to-one
-    # match by another METERED event claims the record
+    # match by another METERED event claims the record...
     posted = _metered("New York City FC", "Toronto FC")
     got, why2 = _select(c, posted)
     assert why2["reason"] != P.R_NO_EXACT      # matched (no money line held)
     assert len(c.claims) == 1
+    # ...and the claim covers nothing against the Red Bulls: New York City
+    # FC and New York Red Bulls share "New York", so the names cannot say
+    # the claiming game is another one
     got, why = _select(c, unposted)
     ab = why["provenance"]["fixture_match"]["absence"]
+    assert ab["no_candidate_near_start"] is False
+    assert ab["records_claimed_by_another_event"] == 0
+    assert ab["named_near_start"] == ["New York City"]
+    assert ab["blocked_by"] == [N.B_NAMED_NEAR_START]
+    assert loop.fixture_not_yet_posted(why, unposted) is None
+    assert loop.no_pinnacle_codes(why, unposted) == [
+        P.R_NO_EXACT, loop.R_PAYLOAD_HAS_NO_PINNACLE]
+    # THE NARROWING FIRES when the claiming names prove another game
+    c = _feed([(2, T, "Operario Ferroviario", "Botafogo SP")])
+    asks = _metered("Ferroviario AC", "Fortaleza", sport_key=SERIE_B)
+    got, why = _select(c, asks)
+    ab = why["provenance"]["fixture_match"]["absence"]
+    assert why["reason"] == P.R_NO_EXACT
+    assert ab["named_near_start"] == ["Operario Ferroviario"]
+    assert ab["no_candidate_near_start"] is False
+    serie_b_posted = _metered("Operario PR", "Botafogo SP", sport_key=SERIE_B)
+    got, why2 = _select(c, serie_b_posted)
+    assert why2["reason"] != P.R_NO_EXACT      # matched canonically
+    assert c.claims.xs[2]["names"] == frozenset(("operario pr", "botafogo sp"))
+    got, why = _select(c, asks)
+    ab = why["provenance"]["fixture_match"]["absence"]
+    assert why["reason"] == P.R_NO_EXACT
     assert ab["no_candidate_near_start"] is True
     assert ab["records_claimed_by_another_event"] == 1
-    assert loop.no_pinnacle_codes(why, unposted) == [
+    assert ab["named_near_start"] == [] and ab["blocked_by"] == []
+    # the 36 h scan still counts the claimed record as naming a team
+    assert ab["sharing"] == ["Operario Ferroviario"]
+    assert loop.no_pinnacle_codes(why, asks) == [
         loop.R_FIXTURE_NOT_YET_POSTED, loop.R_PAYLOAD_HAS_NO_PINNACLE]
+    # the index path answers the same
+    ex2: dict = {}
+    assert P.match_event(c, asks, "soccer", index=P.fixture_index(c),
+                         explain=ex2)[1] == P.R_NO_EXACT
+    assert ex2["absence"]["no_candidate_near_start"] is True
     # a PinnAPI-native seed claims nothing: its identity is the fixture
     c = _feed([(2, T, "New York City", "Toronto")])
     seed = dict(_metered("New York City", "Toronto"),
                 pinnapi_native={"fixture_id": 2, "family": "soccer"})
     P.match_event(c, seed, "soccer")
     assert len(c.claims) == 0
-    # an event of the SAME two names claims nothing against itself (the
-    # same game listed twice): the record stays a candidate for it
+    # a claim by an event whose names ARE the asking names covers nothing:
+    # the twin simply matches
     c = _feed([(2, T, "New York City", "Toronto")])
     _select(c, posted)
-    dup = _metered("NYC FC", "Toronto FC")  # misses; its names differ
-    got, why = _select(c, dup)
-    assert why["reason"] == P.R_NO_EXACT
-    # ...but a claim by an event whose names ARE the asking names covers
-    # nothing: the record is a candidate again
     twin = _metered("New York City FC", "Toronto FC")
     got, why = _select(c, twin)
     assert why["reason"] != P.R_NO_EXACT      # it simply matches
     # the record's names changing since the claim (a frame renames the
     # away side) voids the claim: the record is a candidate again
-    c = _feed([(2, T, "New York City", "Toronto")])
-    _select(c, posted)
+    c = _feed([(2, T, "Operario Ferroviario", "Botafogo SP")])
+    _select(c, serie_b_posted)
     assert len(c.claims) == 1
-    _add(c, 2, T, "New York City", "Columbus")
-    got, why = _select(c, unposted)
+    _add(c, 2, T, "Operario Ferroviario", "Novorizontino")
+    got, why = _select(c, asks)
     ab = why["provenance"]["fixture_match"]["absence"]
     assert ab["no_candidate_near_start"] is False
-    assert ab["named_near_start"] == ["New York City"]
+    assert ab["named_near_start"] == ["Operario Ferroviario"]
     assert ab["records_claimed_by_another_event"] == 0
+
+
+def test_b3_a_claim_never_covers_a_record_against_its_own_event_or_the_same_game():
+    """The independent review of 3764b24b, probes B and B2. (i) The asking
+    event's OWN earlier match: New York City FC v Toronto FC (id E1) matched
+    the feed's New York City v Toronto; the metered provider then renders
+    the same event NYC FC v Toronto FC. (ii) A second metered listing of the
+    SAME game under another id and rendering, after the first matched. Both
+    read NOT_YET_POSTED (EXTERNAL) on the first cut for a fixture that IS in
+    the feed; both are NO_EXACT (SOFTWARE), named, as on the base."""
+    # (i) the same event id, re-rendered
+    c = _feed([(2, T, "New York City", "Toronto")])
+    e1 = _metered("New York City FC", "Toronto FC", eid="E1")
+    got, why = _select(c, e1)
+    assert why["reason"] != P.R_NO_EXACT
+    assert c.claims.xs[2]["event_id"] == "E1"
+    renamed = dict(e1, home_team="NYC FC", away_team="Toronto FC")
+    got, why = _select(c, renamed)
+    assert why["reason"] == P.R_NO_EXACT
+    ab = why["provenance"]["fixture_match"]["absence"]
+    assert ab["no_candidate_near_start"] is False
+    assert ab["records_claimed_by_another_event"] == 0
+    assert ab["named_near_start"] == ["New York City", "Toronto"]
+    assert ab["blocked_by"] == [N.B_NAMED_NEAR_START]
+    assert loop.fixture_not_yet_posted(why, renamed) is None
+    assert loop.no_pinnacle_codes(why, renamed) == [
+        P.R_NO_EXACT, loop.R_PAYLOAD_HAS_NO_PINNACLE]
+    assert loop.absence_evidence_codes(why, renamed)[0] == \
+        loop.R_ABSENCE_BLOCKED_NAMED_NEAR_START
+    # (ii) another id, another rendering of the same game
+    c = _feed([(2, T, "New York City", "Toronto")])
+    _select(c, _metered("New York City FC", "Toronto FC", eid="A"))
+    b = _metered("NYC FC", "Toronto FC", eid="B")
+    got, why = _select(c, b)
+    assert why["reason"] == P.R_NO_EXACT
+    ab = why["provenance"]["fixture_match"]["absence"]
+    assert ab["no_candidate_near_start"] is False
+    assert ab["records_claimed_by_another_event"] == 0
+    assert ab["blocked_by"] == [N.B_NAMED_NEAR_START]
+    assert loop.no_pinnacle_codes(why, b)[0] == P.R_NO_EXACT
+    # the census reads such a row as SOFTWARE by NO_EXACT
+    codes = loop.no_pinnacle_codes(why, b) + loop.absence_evidence_codes(
+        why, b)
+    out = loop._event_outcome(codes)
+    fl = CFL.first_loss_of_event(
+        {"outcome": "REFUSED", "first_refusal": out["first_refusal"],
+         "codes": out["codes"], "stage": "1_PROBABILITY", "reach": 2},
+        [], [], valuations_read=True, decisions_read=True)
+    assert fl["class"] == RT.SOFTWARE and fl["code"] == P.R_NO_EXACT
+    # the rule itself: could the claiming names be the asking game's?
+    assert N.could_be_one_game({"new york city fc", "toronto fc"},
+                               {"nyc fc", "toronto fc"}, "soccer") is True
+    assert N.could_be_one_game({"new york city fc", "toronto fc"},
+                               {"new york red bulls", "d.c. united"},
+                               "soccer") is True
+    # the acronym of the canonical form alone (New York City FC is NYC)
+    assert N.could_be_one_game({"new york city fc", "zzz"},
+                               {"nyc fc", "yyy"}, "soccer") is True
+    # only an affiliative word in common: another game
+    assert N.could_be_one_game({"atlanta united", "orlando city"},
+                               {"d.c. united", "new york red bulls"},
+                               "soccer") is False
+    assert N.could_be_one_game({"operario pr", "botafogo sp"},
+                               {"ferroviario ac", "fortaleza"},
+                               "soccer") is False
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -422,6 +545,82 @@ def test_d_a_near_tombstone_at_the_same_start_keeps_no_exact_and_names_it():
     assert s["protected_eviction"] == 1
 
 
+def test_d2_a_far_fixtures_tombstone_stands_until_its_start_has_passed():
+    """The independent review of 3764b24b, probe E. `_bound` evicts the
+    FARTHEST start first; the collector asks about a metered event only
+    inside 24 h of its start. A fixture five days out, evicted now, is first
+    asked about 96 h later -- past a window measured from the eviction, so
+    its tombstone was gone and the miss read FEED_HOLDS_NO_FIXTURE_FOR_
+    EITHER_TEAM (EXTERNAL) on no evidence. The window runs from the later of
+    the eviction and the START: the tombstone stands through every question
+    the collector can ask (until 6 h after kick-off), and NO_EXACT stays,
+    named."""
+    far = NOW + 5 * DAY
+    c = _feed([(1, far, "Far United", "Away Town"),
+               (3, T, "Flamengo", "Palmeiras")], max_events=1)
+    assert 1 not in c.events and c.counts["events_evicted"] == 1
+    t, = c.tombstones.within(NOW)
+    assert t["id"] == 1 and t["expires_at"] == far + F.TOMBSTONE_RETENTION_S
+    ask_at = far - cov.HORIZON_AHEAD_S          # the collector's first question
+    assert ask_at - NOW > F.TOMBSTONE_RETENTION_S  # ...past the age window
+    ev = _metered("Far United", "Away Town", start=far)
+    for at in (ask_at, far, far + cov.HORIZON_BEHIND_S):
+        c.clock = lambda at=at: at
+        got, why = _select(c, ev, at=at)
+        assert got is None and why["reason"] == P.R_NO_EXACT, at
+        ab = why["provenance"]["fixture_match"]["absence"]
+        assert ab["no_candidate_near_start"] is False
+        assert ab["tombstones_near"] == ["Far United", "Away Town"]
+        assert ab["blocked_by"] == [N.B_TOMBSTONE_NEAR_START]
+        assert ab["absent"] is False
+        assert loop.fixture_not_yet_posted(why, ev) is None
+        assert loop.no_pinnacle_codes(why, ev) == [
+            P.R_NO_EXACT, loop.R_PAYLOAD_HAS_NO_PINNACLE]
+        assert loop.absence_evidence_codes(why, ev)[0] == \
+            loop.R_ABSENCE_BLOCKED_TOMBSTONE_NEAR_START
+        assert c.tombstones.expired == 0
+    st = c.tombstones.status(ask_at)
+    assert st["held"] == 1 and st["held_by_start"] == 1
+    assert st["held_start_unknown"] == 0
+    # the heartbeat carries it
+    assert c.census(now_ms=ask_at * 1000)["retention"]["tombstones"][
+        "held_by_start"] == 1
+    # the index path answers the same
+    c.clock = lambda: ask_at
+    ex2: dict = {}
+    assert P.match_event(c, ev, "soccer", index=P.fixture_index(c),
+                         explain=ex2)[1] == P.R_NO_EXACT
+    assert ex2["absence"]["blocked_by"] == [N.B_TOMBSTONE_NEAR_START]
+    # the retention past the START: the tombstone is no doubt any more, and
+    # a miss then (nothing left names a team) is the feed's answer
+    gone = far + F.TOMBSTONE_RETENTION_S + 1
+    c.clock = lambda: gone
+    assert c.tombstones.within(gone) == [] and c.tombstones.expired == 1
+    got, why = _select(c, ev, at=gone)
+    assert why["reason"] == N.R_NOT_IN_FEED
+    # a tombstone whose start has PASSED ages from its eviction, as before
+    c = _feed([(1, NOW - 2 * DAY, "Old United", "Gone Town"),
+               (3, T, "Flamengo", "Palmeiras")], max_events=1)
+    t, = c.tombstones.within(NOW)
+    assert t["expires_at"] == NOW + F.TOMBSTONE_RETENTION_S
+    assert c.tombstones.within(NOW + F.TOMBSTONE_RETENTION_S + 1) == []
+    # the pure ring: expiry is not monotonic in eviction order -- an
+    # expired tombstone behind a far one is still swept out, the far one
+    # stands, and the counts say so
+    ring = F.Tombstones(size=4, retention_s=10.0)
+    ring.add({"id": "far", "sport_id": 1, "start_s": 1000.0,
+              "evicted_at": 0.0, "protected": False})
+    ring.add({"id": "near", "sport_id": 1, "start_s": 2.0,
+              "evicted_at": 1.0, "protected": False})
+    ring.add({"id": "none", "sport_id": 1, "start_s": None,
+              "evicted_at": 2.0, "protected": False})
+    assert [t["id"] for t in ring.within(5.0)] == ["far", "near", "none"]
+    assert [t["id"] for t in ring.within(13.0)] == ["far"]
+    assert ring.expired == 2 and "near" not in ring.by_id
+    assert [t["id"] for t in ring.within(1010.0)] == ["far"]   # stands AT it
+    assert ring.within(1010.5) == [] and ring.expired == 3
+
+
 # ═════════════════════════════════════════════════════════════════════
 # (e) AN OVERFLOW INSIDE THE WINDOW KEEPS THE DOUBT; A COUNTER THE RING
 #     CANNOT PLACE KEEPS IT; THE DOUBT LIFTS WITH THE WINDOW
@@ -445,15 +644,50 @@ def test_e_overflow_keeps_the_doubt_until_the_window_has_passed():
     assert loop.absence_evidence_codes(why, ev)[0] == \
         loop.R_ABSENCE_BLOCKED_TOMBSTONE_OVERFLOW
     assert loop.no_pinnacle_codes(why, ev)[0] == P.R_NO_EXACT
-    # the window passes: whatever was dropped has aged out of every
-    # question, and the two tombstones still held have aged out too
-    c.clock = lambda: NOW + F.TOMBSTONE_RETENTION_S + 1
-    assert c.tombstones.overflow_inside(c.clock()) is False
-    assert c.tombstones.within(c.clock()) == []
-    got, why = _select(c, ev, at=c.clock())
+    # the window from the DROP passes -- but what was dropped (the fixtures
+    # 3, 4 and 5 days past T) would still have stood by its START, so the
+    # ring still cannot say what it lost: the doubt stays; the two
+    # tombstones held (6 and 7 days past T) stand too, by their starts
+    at = NOW + F.TOMBSTONE_RETENTION_S + 1
+    assert c.tombstones.overflow_until == T + 5 * DAY + F.TOMBSTONE_RETENTION_S
+    assert c.tombstones.overflow_inside(at) is True
+    assert [t["id"] for t in c.tombstones.within(at)] == [13, 14]
+    assert c.tombstones.status(at)["held_by_start"] == 2
+    c.clock = lambda: at
+    got, why = _select(c, ev, at=at)
+    ab = why["provenance"]["fixture_match"]["absence"]
+    assert why["reason"] == P.R_NO_EXACT
+    assert ab["blocked_by"] == [N.B_TOMBSTONE_OVERFLOW]
+    # past the latest start anything dropped or held had, plus the window:
+    # every doubt lifts
+    at = T + 7 * DAY + F.TOMBSTONE_RETENTION_S + 1
+    c.clock = lambda: at
+    assert c.tombstones.overflow_inside(at) is False
+    assert c.tombstones.within(at) == []
+    got, why = _select(c, ev, at=at)
     ab = (why.get("provenance") or {}).get("fixture_match", {}).get("absence")
     assert ab["no_candidate_near_start"] is True and ab["blocked_by"] == []
     assert why["reason"] == N.R_NOT_IN_FEED       # nothing names a team now
+    # the pure ring: an overflow's doubt is never shorter than the window
+    # from the drop (a dropped tombstone whose start has passed)
+    ring = F.Tombstones(size=1, retention_s=10.0)
+    ring.add({"id": 1, "sport_id": 1, "start_s": 0.0, "evicted_at": 0.0,
+              "protected": False})
+    ring.add({"id": 2, "sport_id": 1, "start_s": 0.0, "evicted_at": 5.0,
+              "protected": False})
+    assert ring.overflowed == 1 and ring.overflow_until == 15.0
+    assert ring.overflow_inside(15.0) is True
+    assert ring.overflow_inside(15.5) is False
+    # ...and at capacity, the expired go before anything live is dropped
+    ring = F.Tombstones(size=2, retention_s=10.0)
+    ring.add({"id": 1, "sport_id": 1, "start_s": 0.0, "evicted_at": 0.0,
+              "protected": False})
+    ring.add({"id": 2, "sport_id": 1, "start_s": 100.0, "evicted_at": 1.0,
+              "protected": False})
+    ring.add({"id": 3, "sport_id": 1, "start_s": 0.0, "evicted_at": 20.0,
+              "protected": False})
+    assert ring.overflowed == 0 and ring.expired == 1
+    assert [t["id"] for t in ring.within(20.0)] == [2, 3]
 
 
 def test_e_a_counter_the_ring_cannot_account_for_keeps_the_doubt():
@@ -515,19 +749,39 @@ def test_e_the_pure_absence_pass_takes_tombstones_claims_and_the_flags():
     ab = N.absence(recs, evicted=0, tombstones=[], overflow=True, **kw)
     assert ab["blocked_by"] == [N.B_TOMBSTONE_OVERFLOW]
     assert ab["absent"] is False
-    # a claim by another event ignores the record for `near`; a claim by
-    # an event of the asking names does not
-    nyc = [{"sport_id": 1, "startTime": iso(T), "id": 2,
-            "participants": [{"name": "New York City"}, {"name": "Toronto"}]}]
-    claims = {2: {"event_id": "x", "names": frozenset(("new york city fc",
-                                                       "toronto fc")),
-                  "fixture_names": frozenset(("new york city", "toronto"))}}
-    ab = N.absence(nyc, tombstones=[], claims=claims, **kw)
+    # a claim by an event the names prove ANOTHER game ignores the record
+    # for `near`; a claim whose names could be the asking game's does not,
+    # nor the asking event's own claim, nor a claim of the asking names
+    ops = [{"sport_id": 1, "startTime": iso(T), "id": 2,
+            "participants": [{"name": "Operario Ferroviario"},
+                             {"name": "Botafogo SP"}]}]
+    kw2 = dict(kw, home="Ferroviario AC", away="Fortaleza")
+    claims = {2: {"event_id": "x", "names": frozenset(("operario pr",
+                                                       "botafogo sp")),
+                  "fixture_names": frozenset(("operario ferroviario",
+                                              "botafogo sp"))}}
+    ab = N.absence(ops, tombstones=[], claims=claims, event_id="asker", **kw2)
     assert ab["no_candidate_near_start"] is True
     assert ab["records_claimed_by_another_event"] == 1
-    ab = N.absence(nyc, tombstones=[], claims={}, **kw)
+    ab = N.absence(ops, tombstones=[], claims={}, **kw2)
+    assert ab["named_near_start"] == ["Operario Ferroviario"]
+    # the asking event's own claim (its names re-rendered) covers nothing
+    ab = N.absence(ops, tombstones=[], claims=claims, event_id="x", **kw2)
+    assert ab["no_candidate_near_start"] is False
+    assert ab["records_claimed_by_another_event"] == 0
+    # a claim whose names share a real token with the asking names covers
+    # nothing: New York City FC v Toronto FC against the Red Bulls
+    nyc = [{"sport_id": 1, "startTime": iso(T), "id": 2,
+            "participants": [{"name": "New York City"}, {"name": "Toronto"}]}]
+    shared = {2: {"event_id": "x", "names": frozenset(("new york city fc",
+                                                       "toronto fc")),
+                  "fixture_names": frozenset(("new york city", "toronto"))}}
+    ab = N.absence(nyc, tombstones=[], claims=shared, event_id="y", **kw)
+    assert ab["no_candidate_near_start"] is False
+    assert ab["records_claimed_by_another_event"] == 0
     assert ab["named_near_start"] == ["New York City"]
-    own = {2: dict(claims[2], names=frozenset((N._fold(DCU), N._fold(NYRB))))}
+    # nor a claim of the asking event's own two names
+    own = {2: dict(shared[2], names=frozenset((N._fold(DCU), N._fold(NYRB))))}
     ab = N.absence(nyc, tombstones=[], claims=own, **kw)
     assert ab["no_candidate_near_start"] is False
     # the wide (36 h) scan still counts the claimed record as naming a team
@@ -655,6 +909,39 @@ def test_f_a_record_is_never_evicted_by_its_own_frame_and_ties_go_by_recency():
             epoch=ep, received_ms=NOW * 1000)
     assert set(c.events) == {3, 7}
     assert [t["id"] for t in c.tombstones.within(NOW)] == [1, 2, 4, 5, 6]
+    # a tombstone with no readable start ages from its eviction (it blocks
+    # nothing a question can place in time)
+    assert c.tombstones.by_id[6]["expires_at"] == NOW + F.TOMBSTONE_RETENTION_S
+    assert c.tombstones.status(NOW)["held_start_unknown"] == 1
+    # a malformed start (a list, a dict: unhashable) in a cached record is
+    # ranked farthest and never raises out of `apply` (independent review of
+    # 3764b24b, probe A: the memoised parser raised TypeError)
+    c4 = F.FeedCache(max_events=2)
+    c4.offload_snapshots = False
+    c4.clock = lambda: NOW
+    ep4 = c4.new_connection([("prematch", 1)])
+    c4.apply({"type": "prematch_matchups", "sport_id": 1, "ts": NOW * 1000,
+              "data": [_rec(1, NOW + DAY, "A", "B")]},
+             epoch=ep4, received_ms=NOW * 1000)
+    for bad in ([2026], {"x": 1}):
+        c4.apply({"type": "prematch_matchups", "sport_id": 1, "ts": NOW * 1000,
+                  "data": [dict(_rec(2, NOW + DAY, "C", "D"), startTime=bad)]},
+                 epoch=ep4, received_ms=NOW * 1000)
+        assert 2 in c4.events and c4.events[2]["startTime"] == bad
+        got = c4.apply({"type": "prematch_matchups", "sport_id": 1,
+                        "ts": NOW * 1000,
+                        "data": [_rec(3, NOW + 2 * DAY, "E", "F")]},
+                       epoch=ep4, received_ms=NOW * 1000)
+        assert got == "prematch_matchups"
+        assert set(c4.events) == {1, 3}, "the unreadable start went first"
+        c4.apply({"type": "prematch_matchups", "sport_id": 1, "ts": NOW * 1000,
+                  "data": [_rec(1, NOW + DAY, "A", "B")]},
+                 epoch=ep4, received_ms=NOW * 1000)
+        assert set(c4.events) == {1, 3}
+        c4._drop_event(3)
+    assert F._start_s([2026]) is None and F._start_s({"x": 1}) is None
+    assert F._start_s(True) is None and F._start_s(float("inf")) is None
+    assert F._start_s(iso(NOW)) == NOW and F._start_s(NOW) == NOW
     # the markets bound evicts whole events in the same order
     c3 = F.FeedCache(max_events=100, max_markets=2)
     c3.offload_snapshots = False

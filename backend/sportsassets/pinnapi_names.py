@@ -387,10 +387,24 @@ def shares_a_token(a, b, family, *, near_start: bool = False) -> bool:
 #:     unchanged, as is every match rule) ignores NEAR_START_STOP -- the
 #:     affiliative words State / St, United / Utd, City and the soccer
 #:     affiliations -- and ignores a record already CLAIMED one-to-one by a
-#:     DIFFERENT metered event (pinnapi_feed.FixtureClaims, written by
-#:     pinnapi_primary.match_event on every exact match): one fixture is one
-#:     game. A claim covers a record only while the record's names are the
-#:     ones matched, and never a claim by an event of the same two names.
+#:     metered event that is PROVABLY ANOTHER GAME (pinnapi_feed.
+#:     FixtureClaims, written by pinnapi_primary.match_event on every exact
+#:     match): one fixture is one game. A claim covers a record only while
+#:     the record's names are the ones matched, and -- the independent review
+#:     of 3764b24b -- only when the claiming event IS another game, which
+#:     the names must show (`_claimed_by_another`):
+#:       - never a claim by the ASKING event itself (its id; the metered
+#:         provider re-rendered its team names since the match);
+#:       - never a claim by an event of the asking event's own two names
+#:         (the same game listed twice);
+#:       - never a claim whose two names share a non-affiliative token or an
+#:         acronym with the asking names: "New York City FC v Toronto FC"
+#:         and "NYC FC v Toronto FC" share Toronto, so the record stays a
+#:         candidate and NO_EXACT stays; "Atlanta United v Orlando City" and
+#:         "D.C. United v New York Red Bulls" share only "united", so the
+#:         record is another game and is ignored.
+#:     Anything less let a fixture that IS in the feed read NOT_YET_POSTED
+#:     (EXTERNAL) with no proof.
 #:
 #: `blocked_by` names every condition that kept `no_candidate_near_start`
 #: False, so a NO_EXACT ledger row says what stood in the way
@@ -411,12 +425,36 @@ def _tokens_near(value, family) -> frozenset:
     return _tokens(value, family) - NEAR_START_STOP
 
 
-def _claimed_by_another(claims, ev, asking: frozenset, now) -> bool:
+def could_be_one_game(names_a, names_b, family) -> bool:
+    """Could two metered renderings of two team pairs be the SAME game? Yes
+    when any name of one shares a non-affiliative token (the near-start
+    tokens) or an acronym -- of the rendering or of its canonical form --
+    with any name of the other. Pure. The claim narrowing in `absence`
+    ignores a claimed record only when this is False of the claiming event
+    and the asking event: anything that could be one game keeps the doubt."""
+    for a in names_a or ():
+        for b in names_b or ():
+            if shares_a_token(a, b, family, near_start=True):
+                return True
+            # the acronym of the canonical form ("New York City FC" is NYC)
+            ca = canonical(a, family, side="feed")["name"]
+            cb = canonical(b, family, side="feed")["name"]
+            aa, ab = _acronym(ca), _acronym(cb)
+            if (aa and aa in _tokens_near(b, family)) or \
+                    (ab and ab in _tokens_near(a, family)):
+                return True
+    return False
+
+
+def _claimed_by_another(claims, ev, asking: frozenset, now, *,
+                        event_id=None, family=None) -> bool:
     """Is this record covered by a claim (pinnapi_feed.FixtureClaims) of a
-    metered event OTHER than the one asking -- so it cannot be the asking
-    fixture under other names? The claim must still describe the record's
-    current names, and a claim by an event of the asking event's own two
-    names (the same game listed twice) covers nothing."""
+    metered event that is PROVABLY ANOTHER GAME than the one asking -- so
+    the record cannot be the asking fixture under other names? The claim
+    must still describe the record's current names; a claim by the asking
+    event itself (`event_id`), by an event of the asking event's own two
+    names, or by an event whose names could be the asking game's
+    (`could_be_one_game`) covers nothing."""
     if claims is None or not isinstance(ev, dict):
         return False
     getter = getattr(claims, "get", None)
@@ -436,7 +474,16 @@ def _claimed_by_another(claims, ev, asking: frozenset, now) -> bool:
             continue
         if frozenset(c.get("fixture_names") or ()) != names:
             continue
-        if frozenset(c.get("names") or ()) == asking:
+        claimant = c.get("event_id")
+        if event_id is not None and claimant is not None \
+                and str(claimant) == str(event_id):
+            # the asking event's own earlier match: the metered provider
+            # has since re-rendered its names -- the record may well be it
+            continue
+        claim_names = frozenset(c.get("names") or ())
+        if claim_names == asking:
+            continue
+        if could_be_one_game(claim_names, asking, family):
             continue
         return True
     return False
@@ -530,7 +577,7 @@ class AbsenceIndex:
 def absence(records, *, sport_id, start, home, away, family,
             evicted=0, tolerance_s=None, prepared=None, tombstones=None,
             claims=None, overflow=False, unaccounted=None,
-            now=None) -> dict:
+            now=None, event_id=None) -> dict:
     """Is the fixture ABSENT from the feed (see the module docstring)? Over
     the feed's raw records (`cache.events` values). {"absent": bool,
     "why": ..., "sport_records": n, "sharing": [up to 4 names]}, plus, when
@@ -546,7 +593,9 @@ def absence(records, *, sport_id, start, home, away, family,
     tombstones for capacity inside its window; `unaccounted`: evictions the
     counter reports beyond the ring's (None: computed as `evicted` minus
     the tombstones given -- a caller without a ring passes nothing and a
-    bare counter then keeps the doubt, exactly as before)."""
+    bare counter then keeps the doubt, exactly as before); `event_id`: the
+    ASKING metered event's id, so a claim it made itself never covers a
+    record against it (`_claimed_by_another`)."""
     sport_records, sharing = 0, []
     near, elsewhere = [], []
     tol = None if tolerance_s is None else float(tolerance_s)
@@ -572,12 +621,14 @@ def absence(records, *, sport_id, start, home, away, family,
         if tol is not None and named:
             if st is None or abs(st - float(start)) <= tol:
                 # AT THE START: the narrowed test (affiliative words are not
-                # a shared name), and never a record another metered event
-                # already is
+                # a shared name), and never a record a metered event that
+                # is provably another game already is
                 narrow = [n for n in named
                           if shares_a_token(n, home, family, near_start=True)
                           or shares_a_token(n, away, family, near_start=True)]
-                if narrow and _claimed_by_another(claims, ev, asking, now):
+                if narrow and _claimed_by_another(
+                        claims, ev, asking, now, event_id=event_id,
+                        family=family):
                     claimed_away += 1
                     narrow = []
                 for n in narrow:

@@ -335,8 +335,10 @@ def match_event(cache, event, family, *, index=None, explain=None):
     (RC6.3 feed-retention) A hit by a METERED event is recorded as that
     fixture's claim (`_claim`, pinnapi_feed.FixtureClaims); a miss asks the
     absence pass about the cache's EVICTED records (its tombstone ring) and
-    ignores records another metered event already is -- see
-    pinnapi_names.NEAR_START_STOP. The match rules are unchanged."""
+    ignores records a metered event that is provably another game already
+    is -- the asking event's own id is handed in, so its own earlier claim
+    never covers a record against it -- see pinnapi_names.NEAR_START_STOP.
+    The match rules are unchanged."""
     sid = SPORTS.get(family)
     start = epoch(event.get("commence_time"))
     home, away = name(event.get("home_team")), name(event.get("away_team"))
@@ -402,7 +404,7 @@ def match_event(cache, event, family, *, index=None, explain=None):
                    tolerance_s=START_TOLERANCE_S, prepared=prepared,
                    tombstones=tomb if ring is not None else None,
                    claims=claims, overflow=overflow, unaccounted=unaccounted,
-                   now=now)
+                   now=now, event_id=event.get("id"))
     ex.update(absence=ab)
     return None, (N.R_NOT_IN_FEED if ab["absent"] else R_NO_EXACT)
 
