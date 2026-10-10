@@ -1084,6 +1084,304 @@ def test_a_newer_open_book_releases_a_not_open_hold(monkeypatch):
     _run(go, monkeypatch)
 
 
+# ── (review 2 of b5290832) the newest word governs in the pass that reads ─
+#
+# b5290832 claimed "a newer not-open word is never passed over for an older
+# open book", but in the pass that MADE the read route_books fell back to the
+# older open book whenever that book was inside the route bound, also when
+# the read just made answered with the venue's word about the market (not
+# open, crossed): the alias was costed on the older book, eligible, and the
+# receipt never named the venue's newer answer.
+
+#: what the venue's newer word looks like on the read, and its refusal
+NEWER_WORDS = {
+    "closed": ({"state": "MARKET_STATE_CLOSED"},
+               CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN),
+    "suspended": ({"state": "MARKET_STATE_SUSPENDED"},
+                  CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN),
+    "crossed": ({"bids": (("0.45", 100),)}, CDB.R_PMUS_ROUTE_BOOK_CROSSED),
+}
+
+
+async def _paper_row(c, slug, at, md=None):
+    md = md or _md()
+    await c.execute(
+        "INSERT INTO paper_book_observations (us_market_slug, "
+        " observed_at, source, bids, offers, market_state, read_basis) "
+        " VALUES ($1, to_timestamp($2), 'TEST_PAPER', $3::jsonb, "
+        " $4::jsonb, $5, 'TEST')", slug, at, json.dumps(md["bids"]),
+        json.dumps(md["offers"]), md["state"])
+
+
+def test_the_venues_word_is_newest_at_one_instant_and_needs_a_receipt():
+    """PURE. (review 2) `market_word` reads the venue's word whatever the
+    book's age; `newest_route_book` puts that word before a book carrying
+    none at one receipt instant; `said_newer` is True only for a word with
+    our receipt instant that is not older than the book."""
+    nop, crx = CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN, CDB.R_PMUS_ROUTE_BOOK_CROSSED
+    closed = _book(state="MARKET_STATE_CLOSED")
+    crossed = _book(bids=[(Decimal("0.45"), 100)])
+    w = CDB.market_word
+    assert w(SLUG, closed) == nop and w(SLUG, crossed) == crx
+    assert w(SLUG, _book(state="MARKET_STATE_SUSPENDED",
+                         observed_at=1.0)) == nop          # any age
+    assert w(SLUG, _book(state="MARKET_STATE_CLOSED",
+                         observed_at=None)) == nop         # untimed: a word
+    for none in (None, _book(), _book(error="HTTPStatusError"),
+                 _book(error="VENUE_HOLD_IN_FORCE", state="CLOSED"),
+                 _book(state="MARKET_STATE_CLOSED",
+                       payload_slug="aec-mlb-bos-nyy-2026-10-07")):
+        assert w(SLUG, none) is None
+    open_ = _book(observed_at=1000.0)
+    nb = CDB.newest_route_book
+    # newest by receipt; at one instant the word first, in either order
+    assert nb(SLUG, [open_, _book(state="CLOSED", observed_at=999.0)]) \
+        is open_
+    tie = _book(state="MARKET_STATE_CLOSED", observed_at=1000.0)
+    assert nb(SLUG, [open_, tie]) is tie and nb(SLUG, [tie, open_]) is tie
+    assert nb(SLUG, [None, open_]) is open_ and nb(SLUG, [None]) is None
+    sn = CDB.said_newer
+    assert sn(SLUG, _book(state="CLOSED", observed_at=1001.0), open_)
+    assert sn(SLUG, tie, open_)                          # one instant
+    assert sn(SLUG, _book(bids=[(Decimal("0.45"), 9)], observed_at=1000.0),
+              open_)
+    assert sn(SLUG, tie, None)
+    assert not sn(SLUG, _book(state="CLOSED", observed_at=999.0), open_)
+    assert not sn(SLUG, _book(state="CLOSED", observed_at=None), open_)
+    assert not sn(SLUG, _book(observed_at=1001.0), open_)  # no word
+    assert not sn(SLUG, _book(error="HTTPStatusError", observed_at=1001.0),
+                  open_)
+
+
+@pg
+@pytest.mark.parametrize("word", sorted(NEWER_WORDS))
+def test_a_newer_not_open_or_crossed_read_never_costs_the_older_open_book(
+        monkeypatch, word):
+    """(review 2) The recorded paper read is OPEN, 0.38 / 0.40 x 100 and
+    22 s old: inside the 30 s route bound but within the 10 s lead, so the
+    recording pass reads the market again -- and the venue answers that it
+    is CLOSED, SUSPENDED or crossed (bid 0.45 > offer 0.40). At b5290832
+    the pass fell back to the older open book: both PMUS candidates costed
+    at 0.40 and eligible, book_detail OPEN / PAPER_BOOK_OBSERVATION. The
+    newer word governs: refused by its name, never costed, the read's own
+    source and state on the receipt; Kalshi still routes; SHADOW / NONE."""
+    kw, why = NEWER_WORDS[word]
+
+    async def go(c):
+        await _seed(c, paper_age_s=22.0)
+        rd = _Reader(_fresh(**kw))
+        res = await W.claims_pass(_Pool(c), record=True, route_reader=rd)
+        assert [x["slug"] for x in rd.calls] == [SLUG]
+        rb = res["pmus_route_books"]
+        assert rb["reads"] == [{"market": SLUG, "outcome": why}]
+        assert rb["accepted"] == {} and rb["refused"] == {why: 1}, rb
+        recs = await _receipts(c)
+        pm = [x for r in recs for x in r["candidates"] if x["venue"] == PMUS]
+        assert len(pm) == 2
+        for x in pm:
+            assert x["eligible"] is False and x["reason"] == why, x
+            assert x["ask"] is None and "all_in" not in x
+            d = x["book_detail"]
+            assert d["source"] == "PMUS_ON_DEMAND_READ:TEST", d
+            assert d["state"] == kw.get("state", "MARKET_STATE_OPEN")
+            assert d["age_s"] < 22.0                 # the read, not the book
+        for r in recs:
+            assert r["mode"] == "SHADOW" and r["production_effect"] == "NONE"
+            assert r["chosen"] and {a["venue"] for a in
+                                    r["chosen"]["allocations"]} == {KALSHI}
+            assert not any(x["venue"] == PMUS and x["eligible"]
+                           for x in r["candidates"])
+        row = await c.fetchrow(
+            "SELECT best_ask, observed_at FROM canonical_claim_aliases "
+            " WHERE alias_key = $1", "%s|%s|YES" % (PMUS, SLUG))
+        assert row["best_ask"] is None and row["observed_at"] is None
+    _run(go, monkeypatch)
+
+
+@pg
+@pytest.mark.parametrize("word", sorted(NEWER_WORDS))
+def test_the_newer_word_governs_in_the_read_pass_and_every_pass_after(
+        monkeypatch, word):
+    """(review 2) route_books at a controlled clock. An OPEN paper book 22 s
+    old; the read at +0 answers the word: refused by its name in that pass
+    (the read's age 0 on the receipt); at +5 with no read budget (a
+    non-recording pass) and at +8 with one the word still refuses the open
+    book (27-30 s old, inside the bound) and nothing is read; at +300 a
+    not-open word is held, a crossed one is read again."""
+    kw, why = NEWER_WORDS[word]
+
+    async def go(c):
+        base = float(int(time.time()))
+        clk = {"t": base}
+        fxs, insts, _d, live = _shape(base, dead=0, live=1,
+                                      prefix="aec-nhl-rc63w")
+        s = live[0]
+        await c.execute("DELETE FROM paper_book_observations "
+                        " WHERE us_market_slug = $1", s)
+        await _paper_row(c, s, base - 22.0)
+        ans = {"kw": kw}
+
+        def make(slug):
+            return {"marketData": _md(**ans["kw"]), "error": None,
+                    "observed_at": clk["t"], "served_by": "TEST"}
+        memo, attempts = {}, {}
+
+        async def one(dt, reads):
+            clk["t"] = base + dt
+            insts[s].book_refusal = None
+            rd = _Reader(make)
+            cen = await CDB.route_books(
+                c, fxs, now=clk["t"], reader=rd if reads else None,
+                reads=reads, memo=memo, attempts=attempts,
+                clock=lambda: clk["t"])
+            return rd, cen, insts[s]
+        rd, cen, i = await one(0.0, 6)
+        assert len(rd.calls) == 1 and cen["reads"] == [
+            {"market": s, "outcome": why}]
+        assert i.book_refusal == why and i.asks == () and \
+            i.observed_at is None and i.book_source is None
+        assert i.book_detail["source"] == "PMUS_ON_DEMAND_READ:TEST"
+        assert i.book_detail["age_s"] == 0.0
+        assert i.book_detail["state"] == kw.get("state", "MARKET_STATE_OPEN")
+        ans["kw"] = {}                              # would answer OPEN now
+        for dt, reads in ((5.0, 0), (8.0, 6)):
+            rd, cen, i = await one(dt, reads)
+            assert rd.calls == [] and cen["reads_made"] == 0
+            assert i.book_refusal == why and i.observed_at is None, (dt, i)
+            assert i.book_detail["source"] == "PMUS_ON_DEMAND_READ:TEST"
+            assert i.book_detail["age_s"] == dt
+        rd, cen, i = await one(300.0, 6)
+        if why == CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN:
+            assert rd.calls == []
+            assert i.book_refusal == CDB.R_PMUS_ROUTE_BOOK_HELD_NOT_OPEN
+            assert i.book_detail["hold_left_s"] == 600.0
+        else:                                       # crossed: not held
+            assert len(rd.calls) == 1 and i.book_refusal is None
+            assert i.book_source == "PMUS_ON_DEMAND_READ:TEST"
+    _run(go, monkeypatch)
+
+
+@pg
+@pytest.mark.parametrize("case", [
+    "tie-closed", "tie-crossed", "older-closed", "failed", "deferred",
+    "mismatch", "no-receipt-closed", "stale-closed"])
+def test_only_a_read_with_no_newer_word_falls_back_to_the_open_book(
+        monkeypatch, case):
+    """(review 2) The open paper book (22 s old) is costed after the read
+    only when the read said nothing newer about the market: it failed, was
+    deferred, answered another market, carries no receipt instant, or its
+    receipt is older than the book (past the bound, or a word 6 s older --
+    the newer open book governs, as on every later pass). A word at the
+    book's very receipt instant governs, in the read pass and on the next
+    pass without a read (27 s: the open book is still inside the bound)."""
+    async def go(c):
+        base = float(int(time.time()))
+        clk = {"t": base}
+        fxs, insts, _d, live = _shape(base, dead=0, live=1,
+                                      prefix="aec-nhl-rc63f")
+        s = live[0]
+        await c.execute("DELETE FROM paper_book_observations "
+                        " WHERE us_market_slug = $1", s)
+        paper_at = base - 22.0
+        await _paper_row(c, s, paper_at)
+        closed = _md(state="MARKET_STATE_CLOSED")
+        crossed = _md(bids=(("0.45", 100),))
+        got = {
+            "tie-closed": (closed, paper_at, None),
+            "tie-crossed": (crossed, paper_at, None),
+            "older-closed": (closed, base - 28.0, None),
+            "failed": (None, base, "HTTPStatusError"),
+            "deferred": (None, base, W.ROUTE_READ_DEFERRED),
+            "mismatch": (_md(state="MARKET_STATE_CLOSED",
+                             slug="aec-nhl-rc63f-99-2026-10-10"), base, None),
+            "no-receipt-closed": (closed, None, None),
+            "stale-closed": (closed, base - 120.0, None)}[case]
+
+        def make(slug):
+            md, at, err = got
+            return {"marketData": md, "error": err, "observed_at": at,
+                    "served_by": "TEST"}
+        memo, attempts = {}, {}
+        governs = case.startswith("tie-")
+        for dt, reads in ((0.0, 6), (3.0, 0)):
+            clk["t"] = base + dt
+            insts[s].book_refusal = None
+            rd = _Reader(make)
+            cen = await CDB.route_books(
+                c, fxs, now=clk["t"], reader=rd if reads else None,
+                reads=reads, memo=memo, attempts=attempts,
+                clock=lambda: clk["t"])
+            i = insts[s]
+            assert len(rd.calls) == (1 if reads else 0)
+            if governs:
+                why = CDB.R_PMUS_ROUTE_BOOK_CROSSED if "crossed" in case \
+                    else CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN
+                assert i.book_refusal == why and i.asks == () and \
+                    i.observed_at is None, (case, dt, i)
+                assert cen["accepted"] == {}
+            else:
+                assert i.book_refusal is None, (case, dt, i)
+                assert i.book_source == "PAPER_BOOK_OBSERVATION:TEST_PAPER"
+                assert i.observed_at == paper_at and i.asks
+                assert i.book_detail["state"] == "MARKET_STATE_OPEN"
+    _run(go, monkeypatch)
+
+
+@pg
+def test_a_paper_recorded_ended_word_holds_only_while_pmus_book_returns_it(
+        monkeypatch):
+    """(review 2, the claim narrowed to what is enforced) A word only the
+    PAPER RUNTIME recorded is seen only while `pmus_book` returns it
+    (PMUS_BOOK_WINDOW_S, 900 s): an ENDED word (EXPIRED) 100 s old holds the
+    market until it drops out of that window at +800 s -- not for
+    ROUTE_BOOK_ENDED_HOLD_S (3600 s) -- the market, never read on demand, is
+    then read (nothing remembers a word of it), and from then on OUR OWN
+    word governs, the 3600 s ENDED hold included."""
+    assert CDB.PMUS_BOOK_WINDOW_S == 900.0 and \
+        CDB.ROUTE_BOOK_ENDED_HOLD_S == 3600.0
+
+    async def go(c):
+        base = float(int(time.time()))
+        clk = {"t": base}
+        fxs, insts, _d, live = _shape(base, dead=0, live=1,
+                                      prefix="aec-nhl-rc63p")
+        s = live[0]
+        await c.execute("DELETE FROM paper_book_observations "
+                        " WHERE us_market_slug = $1", s)
+        await _paper_row(c, s, base - 100.0, _md(state="MARKET_STATE_EXPIRED"))
+
+        def make(slug):
+            return {"marketData": _md(state="MARKET_STATE_EXPIRED"),
+                    "error": None, "observed_at": clk["t"],
+                    "served_by": "TEST"}
+        memo, attempts = {}, {}
+
+        async def one(dt):
+            clk["t"] = base + dt
+            insts[s].book_refusal = None
+            rd = _Reader(make)
+            await CDB.route_books(c, fxs, now=clk["t"], reader=rd, reads=6,
+                                  memo=memo, attempts=attempts,
+                                  clock=lambda: clk["t"])
+            return rd, insts[s]
+        held = CDB.R_PMUS_ROUTE_BOOK_HELD_NOT_OPEN
+        for dt, left in ((0.0, 3500.0), (799.0, 2701.0)):   # the word is seen
+            rd, i = await one(dt)
+            assert rd.calls == [] and i.book_refusal == held, (dt, i)
+            assert i.book_detail["hold_left_s"] == left
+            assert i.book_detail["source"] == \
+                "PAPER_BOOK_OBSERVATION:TEST_PAPER"
+        rd, i = await one(801.0)               # dropped out of the window
+        assert [x["slug"] for x in rd.calls] == [s]
+        assert i.book_refusal == CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN
+        assert i.book_detail["source"] == "PMUS_ON_DEMAND_READ:TEST"
+        rd, i = await one(1101.0)              # our own word: 3600 s, ENDED
+        assert rd.calls == [] and i.book_refusal == held, i
+        assert i.book_detail["hold_left_s"] == 3300.0
+        assert i.book_detail["source"] == "PMUS_ON_DEMAND_READ:TEST"
+    _run(go, monkeypatch)
+
+
 @pg
 def test_the_route_book_writes_nothing_and_places_nothing(monkeypatch):
     """No capital effect: the pass writes only its SHADOW evidence tables
