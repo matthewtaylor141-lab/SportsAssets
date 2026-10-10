@@ -2769,6 +2769,8 @@ PMUS_EXEC_STREAM = {
     # close-position requested at or after the newest account snapshot (or
     # with no snapshot at all): the venue's position there is not currently
     # evidenced -- a freshness gap of the venue evidence at management
+    # (review r3: the SELL first WAITS, PLANNED, and is refused by this code
+    # only when execmirror.SELL_EVIDENCE_WAIT_MAX_S passes without evidence)
     "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED": (S, FRESH, "MANAGEMENT"),
 }
 for _k, _v in PMUS_EXEC_STREAM.items():

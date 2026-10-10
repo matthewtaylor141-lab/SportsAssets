@@ -187,12 +187,59 @@ R_SELL_NOT_THE_HELD_SIDE = "RISK_REDUCING_SELL_DOES_NOT_CLOSE_THE_HELD_SIDE"
 # close-position requested on the market at or after that snapshot (the
 # snapshot no longer evidences the position) EXCLUDES the SELL by name, and so
 # does a snapshot whose reconciliation names the market (the venue's position
-# there is not what our fills say). Nothing is sent; an exit refused this way
-# is planned again by close_orphans once the paper position is closed, and
-# admitted only against a snapshot that agrees.
+# there is not what our fills say). Nothing is sent in either case.
+#
+# rc6.3 pmus-exec (review r3): A GAP IN THE VENUE'S EVIDENCE IS A WAIT, NOT
+# A REFUSAL. Made terminal (EXCLUDED), the rule above dropped real exits while
+# the venue still held the position: (a) the first RUNNING tick after a stop
+# submitted before its next snapshot (taken only every SNAPSHOT_EVERY_S), so
+# after a stop whose flatten did not trade and a quick resume every SELL was
+# NOT_EVIDENCED; (b) with no stop at all, one snapshot can read the venue
+# after a resting fill landed but before our poll booked it, so it names the
+# market with the venue holding MORE than our fills said. Either way the live
+# STANDING_PROTECTION was refused on every tick until MAX_PROTECTION_ROWS was
+# spent (lost for good), and a paper REDUCE -- mirrored once, never planned
+# again -- was dropped. Now:
+#   * the first RUNNING tick after any stopped one takes its account snapshot
+#     BEFORE it recovers, plans or submits (outside SHADOW, one attempt;
+#     Mirror._snapshot_due);
+#   * a SELL WAITS -- the row stays PLANNED, still committed against the
+#     inventory so nothing else sells the same contracts, nothing is sent,
+#     no attempt counted, the evidence on the row and one
+#     AWAITING_VENUE_EVIDENCE event per change of it -- while the newest
+#     snapshot predates a close-position on the market (NOT_EVIDENCED), or
+#     names the market with the venue holding MORE on the held side than our
+#     fills said (the snapshot is behind our books, it does not say the sale
+#     would oversell); it is judged again on every pass and goes out, or is
+#     refused by name, against the first snapshot newer than the one it waits
+#     on; a waiting row is taken after every other PLANNED row;
+#   * the wait is bounded: a newer snapshot that still names the market, or
+#     SELL_EVIDENCE_WAIT_MAX_S without one, EXCLUDES the row by the code it
+#     waited on (`wait_expired` on the row);
+#   * a snapshot whose venue position on the market is LESS than our fills
+#     say (flat after a flatten that traded: the P4 case) still EXCLUDES the
+#     SELL at once -- selling our count could open the other side;
+#   * resync_protection plans a protection again only a minute after a
+#     refusal on the venue's evidence (as after a REJECTED), and those
+#     refusals do not count toward MAX_PROTECTION_ROWS, so the protection
+#     comes back once a snapshot agrees.
 R_SELL_VENUE_POSITION_NOT_EVIDENCED = \
     "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED"
 R_SELL_VENUE_POSITION_DISAGREES = "VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS"
+#: the event (and the admission's return) of a risk-reducing SELL left
+#: PLANNED until a snapshot evidences its market (review r3)
+AWAITING_VENUE_EVIDENCE = "RISK_REDUCING_SELL_AWAITING_VENUE_EVIDENCE"
+#: how long a risk-reducing SELL waits for that evidence: as long as an
+#: account snapshot is admissible evidence at all (review r3)
+SELL_EVIDENCE_WAIT_MAX_S = 180.0
+#: the venue's signed netPosition for the side a group holds (signed_net_sql)
+HELD_SIGN = {"ORDER_INTENT_BUY_LONG": 1, "ORDER_INTENT_BUY_SHORT": -1}
+#: a protection child the admission refused on the venue's evidence is planned
+#: again only after the same minute's pause as a REJECTED one, and is not
+#: counted toward MAX_PROTECTION_ROWS (review r3)
+PROTECTION_PAUSE_EXCLUSIONS = (R_SELL_VENUE_POSITION_DISAGREES,
+                               R_SELL_VENUE_POSITION_NOT_EVIDENCED)
+PROTECTION_PAUSE_S = 60.0
 #: the event every close-position request writes BEFORE it is sent (so a
 #: request whose answer was lost, or whose process died, is still on record)
 FLATTEN_REQUESTED = "FLATTEN_REQUESTED"
@@ -1266,7 +1313,7 @@ async def live_inventory(conn, group_id) -> dict:
             "opened_intent": opened}
 
 
-async def venue_position_evidence(conn, slug: str) -> dict:
+async def venue_position_evidence(conn, slug: str, held_sign: int | None = None) -> dict:
     """WHAT THE VENUE LAST SAID ABOUT ONE MARKET'S POSITION, for a
     risk-reducing SELL (rc6.3 pmus-exec, review r2; the rule at
     R_SELL_VENUE_POSITION_NOT_EVIDENCED). `code` is None when the newest
@@ -1274,7 +1321,11 @@ async def venue_position_evidence(conn, slug: str) -> dict:
     requested on the market at or after it (FLATTEN_REQUESTED -- the fills
     never book one), and its reconciliation does not name the market.
     Otherwise the refusal code, with the evidence. A difference on ANOTHER
-    market never blocks this market's exit."""
+    market never blocks this market's exit. With `held_sign` (HELD_SIGN of
+    the side the group holds), a difference also says whether the venue held
+    MORE on that side than our fills (net of the baseline) said
+    (`venue_holds_more_than_fills`, review r3: the snapshot was behind our
+    books, so the SELL waits for a newer one)."""
     snap = await conn.fetchrow(
         """SELECT snapshot_id, at, reconciliation FROM execmirror_snapshots
             ORDER BY at DESC, snapshot_id DESC LIMIT 1""")
@@ -1299,7 +1350,17 @@ async def venue_position_evidence(conn, slug: str) -> dict:
     rec = json.loads(rec) if isinstance(rec, str) else dict(rec or {})
     diff = (rec.get("differences") or {}).get(slug)
     if rec.get("reconciled") is not True and diff is not None:
-        return dict(ev, code=R_SELL_VENUE_POSITION_DISAGREES, difference=diff)
+        out = dict(ev, code=R_SELL_VENUE_POSITION_DISAGREES, difference=diff)
+        if held_sign in (1, -1):
+            try:
+                ahead = held_sign * (Decimal(str(diff.get("venue") or 0))
+                                     - Decimal(str(diff.get("baseline") or 0))
+                                     - Decimal(str(diff.get("mirror_fills_net") or 0)))
+                more = bool(ahead.is_finite() and ahead > 0)
+            except Exception:                                 # noqa: BLE001
+                more = False                                  # unreadable: never more
+            out["venue_holds_more_than_fills"] = more
+        return out
     return dict(ev, code=None)
 
 
@@ -1547,6 +1608,11 @@ class Mirror:
         self._last_management = 0.0
         self._last_snapshot = 0.0
         self._buying_power = None
+        # set by every stopped tick: the first RUNNING tick after it takes its
+        # account snapshot before anything else (outside SHADOW; cleared by
+        # that attempt, or by any snapshot that succeeded -- review r3,
+        # AWAITING_VENUE_EVIDENCE)
+        self._snapshot_due = False
         # an incomplete emergency stop: when it was last attempted, the slugs
         # (and our net at the time) already flattened in this stop, and the
         # last reason recorded (one event per change of reason)
@@ -1584,6 +1650,12 @@ class Mirror:
                          found=fp)
             return {"state": "HALTED_ACCOUNT_CHANGED"}
         if ctl.get("stopped"):
+            # rc6.3 review r3: a stop can move the venue's positions behind our
+            # fills (the flatten's close-position is never booked), so the
+            # first RUNNING tick after this one snapshots before it submits.
+            # A stopped lane itself still takes no snapshot
+            # (OWNER_SNAPSHOT_WHILE_STOPPED).
+            self._snapshot_due = True
             out = await self.emergency_stop(conn, ctl)
             if (out.get("state") == "STOPPED" and ctl.get("stop_done_at")) \
                     or out.get("state") == "STOP_INCOMPLETE":
@@ -1597,7 +1669,15 @@ class Mirror:
         # stop flattens what it is asked to, whatever an earlier one sent)
         self._reset_stop_memory()
         out = {"state": "RUNNING"}
-        if self._buying_power is None:
+        # the first RUNNING tick after a stop: the snapshot comes BEFORE
+        # recover / plan_new / submit_planned, so a risk-reducing SELL is
+        # judged against the venue's record taken after the stop (outside
+        # SHADOW, where that admission exists; SHADOW keeps its cadence).
+        # One attempt: if it fails, a waiting SELL waits for the next one at
+        # the usual cadence (never a read of the account on every tick)
+        if self._buying_power is None or (
+                self._snapshot_due and not small_live_is_shadow()):
+            self._snapshot_due = False
             out["snapshot"] = await self.snapshot(conn, ctl)
         out["recovered"] = await self.recover(conn)
         out["planned"] = await self.plan_new(conn, ctl)
@@ -1891,8 +1971,13 @@ class Mirror:
 
     # --- submission --------------------------------------------------------
     async def submit_planned(self, conn) -> int:
+        # a risk-reducing SELL left PLANNED until a snapshot evidences its
+        # market (AWAITING_VENUE_EVIDENCE) is taken after every other PLANNED
+        # row, so waiting rows never hold one up
         rows = await conn.fetch(
-            "SELECT * FROM execmirror_orders WHERE state = 'PLANNED' ORDER BY created_at LIMIT 10")
+            """SELECT * FROM execmirror_orders WHERE state = 'PLANNED'
+                ORDER BY coalesce((detail->'risk_reducing_sell') ? 'awaiting', false),
+                         created_at LIMIT 10""")
         n = 0
         for r in rows:
             params = (json.loads(r["detail"]) if isinstance(r["detail"], str)
@@ -1907,7 +1992,7 @@ class Mirror:
                 # outside SHADOW only: the inventory re-read and the claim in
                 # one transaction under the row lock (SHADOW: unchanged below)
                 adm = await self._admit_and_claim_sell(conn, r["mirror_id"])
-                if adm is None:
+                if adm is None or adm == AWAITING_VENUE_EVIDENCE:
                     continue
                 if isinstance(adm, str):
                     n += 1
@@ -1982,14 +2067,21 @@ class Mirror:
         (venue fills only) and the quantity its OTHER open SELLs already
         commit, and either claim the row (SUBMITTING) and return the
         RiskReducingSell that Venue.place admits, or EXCLUDE it by name (the
-        code is returned) -- nothing sent. None when the row is no longer
-        PLANNED (another pass took it)."""
+        code is returned) -- nothing sent. AWAITING_VENUE_EVIDENCE when the
+        venue's position on the market is not yet evidenced, or the newest
+        snapshot is behind our books (review r3): the row stays PLANNED,
+        nothing sent, judged again on the next pass, for at most
+        SELL_EVIDENCE_WAIT_MAX_S and at most until one newer snapshot. None
+        when the row is no longer PLANNED (another pass took it)."""
         async with conn.transaction():
             cur = await conn.fetchrow(
                 "SELECT * FROM execmirror_orders WHERE mirror_id = $1 FOR UPDATE",
                 mirror_id)
             if cur is None or cur["state"] != "PLANNED":
                 return None
+            det = cur["detail"]
+            det = json.loads(det) if isinstance(det, str) else dict(det or {})
+            prev = det.get("risk_reducing_sell") or {}
             inv = await live_inventory(conn, cur["group_id"])
             mine = int(cur["live_qty"] or 0) - int(Decimal(str(cur["cum_qty"] or 0)))
             committed_other = max(int(inv["committed"]) - mine, 0)
@@ -2008,9 +2100,50 @@ class Mirror:
                   "basis": "execmirror_fills under the row lock"}
             if code is None:
                 # rc6.3 review r2: the venue's own record of the position
-                venue = await venue_position_evidence(conn, cur["us_market_slug"])
+                venue = await venue_position_evidence(
+                    conn, cur["us_market_slug"],
+                    held_sign=HELD_SIGN.get(inv["opened_intent"] or ""))
                 code = venue.pop("code")
                 ev["venue_position"] = venue
+            # rc6.3 review r3: a gap in the venue's evidence is a WAIT. The row
+            # stays PLANNED (still committed against the inventory), nothing
+            # is sent, no attempt is counted, the evidence is on the row and
+            # one event is written per change of it -- not one per pass.
+            waiting = prev.get("awaiting")
+            since = prev.get("awaiting_since_epoch_s") if waiting else None
+            since = self._now() if since is None else since
+            sid = (ev.get("venue_position") or {}).get("account_snapshot_id")
+            wait = False
+            if code == R_SELL_VENUE_POSITION_NOT_EVIDENCED:
+                wait = True              # until a snapshot after the close
+            elif code == R_SELL_VENUE_POSITION_DISAGREES and \
+                    ev["venue_position"].get("venue_holds_more_than_fills"):
+                # the snapshot was behind our books: wait for a NEWER one;
+                # one newer that still names the market ends the wait
+                first = (prev.get("waiting_on_snapshot_id")
+                         if waiting == code else None)
+                wait = first is None or first == sid
+            if wait and self._now() - since > SELL_EVIDENCE_WAIT_MAX_S:
+                wait = False             # bounded: refused by the code it waited on
+                ev["wait_expired"] = True
+            if wait:
+                rec = json.loads(_j(dict(ev, awaiting=code, waiting_on_snapshot_id=sid,
+                                         awaiting_since_epoch_s=since)))
+                if prev != rec:
+                    await conn.execute(
+                        """UPDATE execmirror_orders SET detail = detail || $2::jsonb,
+                             updated_at = now()
+                           WHERE mirror_id = $1 AND state = 'PLANNED'""",
+                        mirror_id, _j({"risk_reducing_sell": rec}))
+                    await _event(conn, AWAITING_VENUE_EVIDENCE, mirror_id=mirror_id,
+                                 paper_order_id=cur["paper_order_id"], **rec)
+                return AWAITING_VENUE_EVIDENCE
+            if waiting:
+                # what this row waited for, kept beside how it ended
+                ev["awaited"] = {k: prev.get(k) for k in (
+                    "awaiting", "awaiting_since_epoch_s", "waiting_on_snapshot_id",
+                    "venue_position")}
+                ev["waited_s"] = round(self._now() - since, 3)
             if code is not None:
                 await conn.execute(
                     """UPDATE execmirror_orders SET state = 'EXCLUDED', exclusion = $2,
@@ -2039,10 +2172,19 @@ class Mirror:
         copies. Returns the exclusion code, or None when it may be sent."""
         now = self._now()
         why, ev = None, {"checked_at": now, "max_intent_age_s": MAX_INTENT_AGE_S}
-        if r["paper_order_id"]:
+        # rc6.3 review r3: a protection CHILD (resync_protection) copies its
+        # paper protection too, named in detail.for_paper_order -- checked
+        # alike, so a child that waited for the venue's evidence is never sent
+        # after that paper protection ended
+        pid = r["paper_order_id"]
+        if not pid and r["role"] == "STANDING_PROTECTION":
+            det = r["detail"]
+            det = json.loads(det) if isinstance(det, str) else (det or {})
+            pid = det.get("for_paper_order")
+        if pid:
             p = await conn.fetchrow(
                 "SELECT state, expires_at FROM paper_orders WHERE order_id = $1",
-                r["paper_order_id"])
+                pid)
             ev["paper_state"] = None if p is None else p["state"]
             if p is None or p["state"] in PAPER_DEAD:
                 why = PAPER_ORDER_ENDED
@@ -2328,7 +2470,8 @@ class Mirror:
         size no longer matches live inventory is cancelled; once nothing is
         working, a new live protection is placed at the current size (a
         child row, `detail.for_paper_order`). At most MAX_PROTECTION_ROWS
-        per paper order, and none within a minute of a refusal."""
+        per paper order (a refusal on the venue's evidence not counted --
+        review r3), and none within a minute of a refusal."""
         papers = await conn.fetch(
             """SELECT p.* FROM paper_orders p
                 WHERE p.role = 'STANDING_PROTECTION' AND p.account_id = $1
@@ -2360,10 +2503,21 @@ class Mirror:
                     await self._cancel(conn, cur, "PROTECTION_RESIZE")
                     n += 1
                 continue
-            if want <= 0 or len(rows) >= MAX_PROTECTION_ROWS:
+            # review r3: a refusal on the venue's evidence says nothing about
+            # the protection itself, so it does not spend MAX_PROTECTION_ROWS
+            # (the minute's pause below bounds how often it recurs)
+            counted = [x for x in rows if not (
+                x["state"] == "EXCLUDED"
+                and x["exclusion"] in PROTECTION_PAUSE_EXCLUSIONS)]
+            if want <= 0 or len(counted) >= MAX_PROTECTION_ROWS:
                 continue
-            if cur["state"] == "REJECTED" and (
-                    self._now() - cur["updated_at"].timestamp()) < 60:
+            # a refusal pauses the next attempt a minute: the venue's (REJECTED)
+            # and, review r3, the admission's on the venue's evidence --
+            # otherwise every 2 s tick spent a row until none were left
+            if (cur["state"] == "REJECTED" or (
+                    cur["state"] == "EXCLUDED"
+                    and cur["exclusion"] in PROTECTION_PAUSE_EXCLUSIONS)) and (
+                    self._now() - cur["updated_at"].timestamp()) < PROTECTION_PAUSE_S:
                 continue
             child = "em:%s:r%d" % (p["order_id"], len(rows))
             plan.detail["for_paper_order"] = p["order_id"]
@@ -2479,6 +2633,8 @@ class Mirror:
             _j([EP._pick(b, EP.BALANCE_FIELDS) for b in bal]),
             _j([dict(slug=s, **EP._pick(p, EP.POSITION_FIELDS)) for s, p in pos.items()]),
             len(oo), _j(rec))
+        # the venue's record after any stop is now on file (review r3)
+        self._snapshot_due = False
         if diffs:
             await _event(conn, "RECONCILIATION_DIFFERENCE", **rec)
         return rec

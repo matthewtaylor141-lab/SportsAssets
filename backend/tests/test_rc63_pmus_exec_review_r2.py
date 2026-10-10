@@ -9,11 +9,15 @@ Each regression in §1-§3 reproduces a reviewer probe and FAILS on 3fa9d7a9:
       flatten), so after a stop with flatten and a resume the group read as
       held 2 with the venue flat, and an exit of 2 was sent -- a SELL_LONG
       with nothing held, a short of 2 (probe P4). Now the claim EXCLUDES it by
-      name while the newest snapshot names the market
-      (VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS) or predates a close-position
-      requested there (RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED -- the
-      first tick after a resume runs before the next snapshot); against a
-      snapshot taken after the close that agrees, the exit goes out;
+      name while the newest snapshot names the market with the venue holding
+      less than our fills (VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS; review
+      r3: a snapshot with the venue holding MORE waits for a newer one);
+      while that snapshot predates a close-position requested there
+      (RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED) it WAITS, PLANNED,
+      nothing sent (review r3: cfaf0844 made that wait a terminal EXCLUDED,
+      and the first tick after a resume submitted before its snapshot -- see
+      tests/test_rc63_pmus_exec_review_r3.py); against a snapshot taken after
+      the close that agrees, the same exit goes out;
   §2  the aggregate cap no longer counts a holding whose live side RESOLVED
       at the venue (expired, or paper-settled with no venue position left):
       after the pilot's first $1.00 position settled, every later BUY was
@@ -161,34 +165,72 @@ async def test_an_exit_after_a_flatten_is_refused_while_the_snapshot_disagrees(
         await conn.close()
 
 
+def _account_reads_fail(venue):
+    """The venue's account reads answer 503 (the snapshot fails), so the
+    newest snapshot on file stays the one from before the stop."""
+    def boom():
+        raise TE._Err(503, "unavailable")
+    venue.balances = boom
+
+
 @pg
 async def test_the_first_exit_after_a_resume_waits_for_a_snapshot_taken_after_the_flatten(
         monkeypatch):
-    """The tick after a resume submits BEFORE its next snapshot (a stopped
-    lane takes none -- OWNER_SNAPSHOT_WHILE_STOPPED), so the newest snapshot
-    is the one from before the stop, reconciled. A close-position was
-    requested on the market after it: the exit is EXCLUDED as not evidenced,
-    nothing sent. 3fa9d7a9: the SELL of 2 was sent and the venue went short 2."""
+    """REVIEW R3 (rewritten): the newest snapshot is the one from before the
+    stop (reconciled) because the account reads after the resume fail, and a
+    close-position was requested on the market after it. The exit WAITS --
+    PLANNED, the evidence recorded, one event, nothing sent -- instead of
+    being dropped; once a snapshot is taken (the venue is flat: the flatten
+    traded), it is EXCLUDED by name with nothing sent and no short opened.
+    3fa9d7a9: the SELL of 2 was sent and the venue went short 2. cfaf0844:
+    EXCLUDED on the first tick, for good, whatever the venue held."""
     conn = await TE._conn()
     try:
         fv = FlattenVenue()
         acct, mirror, entry = await _held_then_stopped_with_flatten(
             conn, monkeypatch, fv)
+        t = [time.time()]
+        mirror._now = lambda: t[0]
         newest = _j(await conn.fetchval(
             "SELECT reconciliation FROM execmirror_snapshots ORDER BY at DESC LIMIT 1"))
         assert newest == {"reconciled": True, "differences": {}}   # pre-stop
         prod = R.ProdPlace(fv)
         mirror._venue = prod
+        real_balances = fv.balances
+        _account_reads_fail(fv)
         ex = await _exit(conn, acct, entry)
         fv.behaviour = [{"fill": 2}]
+        for _ in range(3):
+            t[0] += M.TICK_S
+            await mirror.tick(conn)
+            r = await TE._row(conn, ex["order_id"])
+            assert (r["state"], r["exclusion"]) == ("PLANNED", None), r
+        rr = _j(r["detail"])["risk_reducing_sell"]
+        assert rr["awaiting"] == "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED"
+        assert rr["venue_position"]["flatten_requests_since_snapshot"] == 1
+        assert (rr["held"], rr["available"]) == (2, 2)
+        assert len(await R._events(conn, M.AWAITING_VENUE_EVIDENCE,
+                                   r["mirror_id"])) == 1     # not one per tick
+        # the first RUNNING tick's one post-stop attempt, not a read per tick
+        assert len(await R._events(conn, "SNAPSHOT_FAILED")) == 1
+        assert prod.rec.created == [] and fv.positions() == {}
+        # the account reads recover: the next snapshot (the usual cadence)
+        # is the first after the flatten and shows the venue flat -- the
+        # exit is refused by name on the next pass, nothing sent
+        fv.balances = real_balances
+        t[0] += M.SNAPSHOT_EVERY_S
+        out = await mirror.tick(conn)
+        assert out["snapshot"]["reconciled"] is False, out
+        assert (await TE._row(conn, ex["order_id"]))["state"] == "PLANNED"
+        t[0] += M.TICK_S
         await mirror.tick(conn)
         r = await TE._row(conn, ex["order_id"])
         assert (r["state"], r["exclusion"]) == (
-            "EXCLUDED", "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED"), r
+            "EXCLUDED", "VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS"), r
+        assert _j(r["detail"])["risk_reducing_sell"]["awaited"]["awaiting"] == \
+            "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED"
         assert prod.rec.created == []
-        assert fv.positions() == {}
-        vp = _j(r["detail"])["risk_reducing_sell"]["venue_position"]
-        assert vp["flatten_requests_since_snapshot"] == 1
+        assert fv.positions() == {}                     # no short was opened
         await _flatten_on_record(conn, entry)
     finally:
         await conn.close()
@@ -196,11 +238,13 @@ async def test_the_first_exit_after_a_resume_waits_for_a_snapshot_taken_after_th
 
 @pg
 async def test_an_exit_is_sent_once_a_snapshot_after_the_flatten_agrees(monkeypatch):
-    """The close-position was answered but did not trade (the venue still
-    holds 2). The first exit after the resume is not evidenced and is
-    EXCLUDED; once a snapshot taken after the close agrees with our fills,
-    the next exit goes out -- the rule never leaves a held position without
-    an exit. 3fa9d7a9: the first exit was sent without that evidence."""
+    """REVIEW R3 (rewritten; no second decision made by hand). The
+    close-position was answered but did not trade (the venue still holds 2).
+    The first RUNNING tick after the stop takes its snapshot BEFORE it
+    submits: that snapshot, taken after the close, agrees with our fills, and
+    the SAME exit goes out on that tick. 3fa9d7a9: sent without that
+    evidence. cfaf0844: this exit was EXCLUDED as not evidenced (the tick
+    submitted before its snapshot) and never sent."""
     conn = await TE._conn()
     try:
         venue = TE.FakeVenue()                          # close: 2xx, no trade
@@ -208,19 +252,17 @@ async def test_an_exit_is_sent_once_a_snapshot_after_the_flatten_agrees(monkeypa
             conn, monkeypatch, venue)
         prod = R.ProdPlace(venue)
         mirror._venue = prod
-        first = await _exit(conn, acct, entry)
-        await mirror.tick(conn)
-        r1 = await TE._row(conn, first["order_id"])
-        assert r1["exclusion"] == "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED", r1
-        assert prod.rec.created == []
-        rec = await mirror.snapshot(conn, await M.control(conn))
-        assert rec == {"reconciled": True, "differences": {}}   # venue holds 2
-        second = await _exit(conn, acct, entry)
+        pre_stop = await conn.fetchval("SELECT max(snapshot_id) FROM execmirror_snapshots")
+        ex = await _exit(conn, acct, entry)
         venue.behaviour = [{"fill": 2}]
-        await mirror.tick(conn)
-        r2 = await TE._row(conn, second["order_id"])
-        assert r2["state"] == "FILLED", r2
-        assert _j(r2["detail"])["risk_reducing_sell"]["admitted"] is True
+        out = await mirror.tick(conn)
+        assert out["snapshot"] == {"reconciled": True, "differences": {}}, out
+        r = await TE._row(conn, ex["order_id"])
+        assert r["state"] == "FILLED", r
+        rr = _j(r["detail"])["risk_reducing_sell"]
+        assert rr["admitted"] is True and "awaited" not in rr
+        # judged against the snapshot this tick took after the flatten
+        assert rr["venue_position"]["account_snapshot_id"] > pre_stop
         assert [(p["intent"], p["quantity"]) for p in prod.rec.created] == [
             ("ORDER_INTENT_SELL_LONG", 2)]
         assert await R._held(conn, entry["group_id"]) == 0
