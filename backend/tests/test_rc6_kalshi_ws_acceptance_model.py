@@ -2788,14 +2788,19 @@ def test_a_late_ack_never_binds_a_market_dropped_after_its_command(
         bound["binds"].append((sid, sorted(tickers), ours))
         return real_bind(sid, tickers, ours=ours)
     b.bind = bind
+    # (round 3) A moves once (seq 3) before the get_snapshot's `ok`: with the
+    # subscribe's own reply counted in the separate-counter bound, an `ok`
+    # at seq 3 on a 2-market sid is the guard's documented false gap; this
+    # test is about the late ack, so the sid carries one more frame first
     ws.script = [MI.prune_to(ctx, ["K-A"]), MI.want_to(ctx, ["K-A", "K-B"]),
                  SEQ.subscribed(1, 7),        # the LATE ack of cmd 1
                  SEQ.snap(7, 1, "K-A"), SEQ.snap(7, 2, "K-B"),
+                 SEQ.delta(7, 3, "K-A"),
                  lambda: bound.update(cmds=[(m["cmd"], m["params"].get(
                      "action"), m["params"].get("market_tickers"))
                      for m in ws.sent]),
-                 SEQ.ok(2, 7, 3), SEQ.snap(7, 4, "K-B"),
-                 SEQ.delta(7, 5, "K-A"), SEQ.delta(7, 6, "K-B")]
+                 SEQ.ok(2, 7, 4), SEQ.snap(7, 5, "K-B"),
+                 SEQ.delta(7, 6, "K-A"), SEQ.delta(7, 7, "K-B")]
     asyncio.run(go())
     # the ack bound A alone; B only when its own get_snapshot was sent
     assert bound["binds"][:2] == [(7, ["K-A"], True), (7, ["K-B"], True)]

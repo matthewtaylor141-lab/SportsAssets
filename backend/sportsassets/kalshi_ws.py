@@ -68,40 +68,84 @@ THE SEQUENCE RULE FOR CONTROL FRAMES (chosen here; the docs give `ok`,
 for snapshot/delta consistency", but never say in words whether it is one
 counter). Every frame carrying our (sid, seq) is part of that sid's
 sequence (`SHARED`, the plain reading): seq == last + 1 advances, anything
-else is a gap. The guard for the other reading: a control frame may advance
-the sequence past CURRENT books only when its seq is above what a separate
-control counter could have reached by then -- the reply to our j-th update
-command on the sid can carry at most j + CONTROL_SEQ_SLACK from a separate
-counter (replies come in command order; the subscribe's own reply may count
-too). At or below that, with a book CURRENT on the sid, it is a gap
-(R_CONTROL_SEQUENCE_AMBIGUOUS); with no CURRENT book on the sid nothing
-can be hidden in the slot, and it advances. A control frame whose seq is at
-or below the last seq, or a data frame that continues the DATA frames
-exactly over the control frames taken between them, proves a separate
-counter: the sid switches to `SEPARATE` (control frames are then counted,
-never sequenced; data frames run by themselves).
+else is a gap. The guard for the other reading is a BOUND: the highest seq
+a separate control counter could carry on a given control frame,
+1 + j + CONTROL_SEQ_SLACK for the reply to our j-th update command on the
+sid (an unknown or missing id: j = every update command sent on it) --
+the subscription's own `subscribed` may have taken number 1 (it carries no
+seq, so whether it counted cannot be seen), each of our j commands at most
+one more, and at most CONTROL_SEQ_SLACK frames the venue sends unasked
+(RC6.2 review, round 3: the bound used to be j + CONTROL_SEQ_SLACK, one
+short when both the `subscribed` and an unasked frame took a number -- a
+lost delta then hid behind the unasked frame). Then:
+  * seq == last + 1: above the bound, or with no book of the sid CURRENT
+    (nothing can be hidden in the slot), it advances; otherwise it is a gap
+    (R_CONTROL_SEQUENCE_AMBIGUOUS).
+  * seq <= last: a shared counter gives the FIRST reply to our command a
+    seq above every frame read before it (one ordered connection) -- unless
+    a frame was lost after the command went out (the reply may then be a
+    late copy, and a gap followed). So the first reply to an update command
+    of ours, with no gap on the sid since it was sent, at or below the
+    bound, proves a separate counter: the sid switches to `SEPARATE`
+    (control frames counted, never sequenced; data frames run by
+    themselves). Anything else at or below the last seq -- a second reply,
+    a frame answering no command we know, one after a gap, one above the
+    bound -- is a REPLAY of the shared sequence: a gap while a book of the
+    sid is CURRENT (R_SEQ_GAP), counted otherwise; never a switch (RC6.2
+    review, round 3: a replayed `ok` used to switch a shared sid to
+    SEPARATE, after which a loss right before the next control frame went
+    unseen until the next data frame).
+  * seq > last + 1: a gap.
+  * In SEPARATE mode a control frame ABOVE the bound proves the shared
+    counter after all: a gap, and the sid is SHARED again from its seq; one
+    past the last DATA seq + 1 with a book CURRENT -- what a shared counter
+    shows after a lost frame (a separate one only on a sid that carried
+    fewer data than control frames) -- is a gap (R_CONTROL_SEQUENCE_
+    AMBIGUOUS). So even a sid wrongly taken as SEPARATE never keeps a book
+    CURRENT across a frame that reveals a loss.
+  * A data frame at exactly the last DATA seq + 1 while control frames took
+    (or skipped) the slots after it proves a separate counter (a shared
+    counter never gives a data frame the seq of a control frame, and a frame
+    lost before a later one never arrives after it): SEPARATE, no gap -- also
+    right after an ambiguous or skipping control frame's gap, whose books
+    are GAP already (RC6.2 review, round 3: that data frame used to be a
+    second gap while the get_snapshot was outstanding, ending the session).
 Why it is safe either way. Shared counter: a control frame is the next
-slot, or (after a loss) above it -- a gap, as for data. Separate counter: a
-control frame can take a slot only while no book of the sid is CURRENT
-(nothing to hide; the data frames it may stand in for precede every
-snapshot applied after it, and a snapshot is a whole book) or when its seq
-is beyond any separate counter -- even when control frames themselves are
-lost. "Beyond any separate counter" rests on two assumptions about a
-SEPARATE counter (the documented shared one needs neither), named here and
-in the proof: C1 the venue answers each of our commands with at most one
-control frame (plus at most CONTROL_SEQ_SLACK it sends unasked), and C2 it
-answers them in the order it received them -- so the reply to our j-th
-update command on the sid carries at most j + CONTROL_SEQ_SLACK. (Without
-C2 the only safe bound is every command sent so far; that bound makes a
-false gap of the documented venue's ordinary first `ok`s whenever several
-add_markets are in flight on a quiet sid, so it is not used.) On a sid
-never acknowledged as ours the bound is every command of the connection.
-What it costs: under a shared counter, a false gap
-only when a sid has carried no more frames than update commands (a
-one-market quiet subscription: one gap, one get_snapshot, then the counts
-part); under a separate counter, none in the usual shape (the first `ok`
-after any data is at or below the last seq: SEPARATE, no gap), at most one
-gap and one get_snapshot otherwise; never a storm.
+slot, or (after a loss) above it -- a gap, as for data; a replay is never
+taken as anything else. Separate counter: a control frame can take a slot
+only while no book of the sid is CURRENT (nothing to hide; the data frames
+it may stand in for precede every snapshot applied after it, and a snapshot
+is a whole book) or when its seq is beyond any separate counter -- even
+when control frames themselves are lost. The bound rests on assumptions
+about a SEPARATE counter (the documented shared one needs none of them),
+named here and in the proof: C1 the venue answers each of our commands
+with at most one control frame, sends at most CONTROL_SEQ_SLACK unasked on
+a subscription, and its `subscribed` takes at most one number; C2 it
+answers our commands in the order it received them. (Without C2 the only
+safe bound is every command sent so far; that bound makes a false gap of
+the documented venue's ordinary first `ok`s whenever several add_markets
+are in flight on a quiet sid, so it is not used.) And for EITHER reading,
+C3: a control frame's seq is a NEW number on its counter, as every data
+frame's is -- never a copy of the sid's current seq (an "echo"). Under an
+echo counter, data frame k lost and the next `ok` echoing k is exactly what
+the documented shared counter sends with nothing lost (data k - 1, then the
+`ok` at k), so no client rule covers it short of treating every reply as a
+gap; an echo is not the "sequential number" the docs give `ok` /
+`unsubscribed` / scoped errors, and RC6.1's storm needed the shared
+counter (an echo venue gives rc6/int-62 no gap). The KWS_CTRL diagnostics
+(seq against prev_data_seq) settle C3 and the counter's reading in
+production. On a sid never acknowledged as ours the bound is 1 + every
+command of the connection + CONTROL_SEQ_SLACK.
+What it costs: under a shared counter, a false gap only when a sid has
+carried no more frames than its update commands + 2 (a one- or two-market
+quiet subscription: one gap, one get_snapshot, then the counts part; a
+second ambiguous reply while that get_snapshot is outstanding ends the
+session -- bounded, fail closed, and the reconnect subscribes every market
+in its one subscribe); under a separate counter, none in the usual shape
+(the first reply to our command after any data is at or below the last
+seq: SEPARATE, no gap), at most one gap and one get_snapshot otherwise (an
+unasked frame, a reply after a gap, a sid with more control than data
+frames); never a storm.
 
 VENUE MEMBERSHIP (RC6.2 review). Sequence continuity of the sid is not
 enough: get_snapshot "returns an orderbook_snapshot for the requested
@@ -217,9 +261,11 @@ MAX_SNAPSHOT_REQUESTS_PER_MARKET = 8
 YIELD_EVERY_FRAMES = 200
 #: (RC6.2) an unchanged wanted list is re-read in full this often (frames)
 WANTED_RECHECK_FRAMES = 200
-#: (RC6.2) a separate control counter cannot carry more than j plus this on
-#: the reply to our j-th update command on a sid (the subscribe's own reply
-#: may count); a control frame above it can only be a shared slot
+#: (RC6.2) control frames a venue with a SEPARATE control counter sends
+#: unasked on a subscription, at most (assumption C1): with the one number
+#: its `subscribed` may take, the reply to our j-th update command on a sid
+#: carries at most 1 + j + this (WsBooks._ctrl_bound); a control frame
+#: above that can only be a shared slot
 CONTROL_SEQ_SLACK = 1
 #: (RC6.2) command ids remembered per sid for that bound (and unanswered
 #: add / delete commands), at most
@@ -436,7 +482,13 @@ class WsBooks:
                       # not known to hold on the sid: in its sequence,
                       # never applied; markets re-added because their add
                       # was unanswered at a gap
-                      "snapshots_not_held": 0, "readd_after_gap": 0}
+                      "snapshots_not_held": 0, "readd_after_gap": 0,
+                      # (RC6.2 review, round 3) control frames at or below
+                      # the last seq that are no proof of a separate counter
+                      # (a second reply, no command we know, a reply after a
+                      # gap, above the bound): replays; SEPARATE sids proved
+                      # shared after all by a control frame above the bound
+                      "control_replayed": 0, "control_seq_shared_again": 0}
         self.resubscribe: set = set()
         #: (RC6 acceptance model) sid -> the HIGHEST seq of a delta seen on
         #: a sid not acknowledged as ours, before its first snapshot: not its
@@ -461,9 +513,10 @@ class WsBooks:
         self.forgotten: set = set()
         #: (RC6.2) sid -> the state of a subscription acknowledged as ours:
         #: mode (SHARED / SEPARATE control-frame sequence), last_data (the
-        #: last DATA seq applied), ctrl_since_data (control frames taken into
-        #: the sequence since it), n_cmds (update commands sent on it),
-        #: cmd_index (command id -> its 1-based index among them), ended
+        #: highest DATA seq seen), n_cmds (update commands sent on it),
+        #: cmd_index (command id -> its 1-based index among them), answered
+        #: (round 3: ids of those whose reply arrived -- a second reply is a
+        #: replay), ended
         #: (None, or why it ended), awaiting (markets whose requested
         #: snapshot is outstanding); (RC6.2 review, VENUE MEMBERSHIP) known
         #: (market -> (command id, held): what the venue's latest reply that
@@ -705,8 +758,9 @@ class WsBooks:
                     self.sid_seq[sid] = prev = 0
                     self.sid_pre.pop(sid, None)
                 self.anchors[sid] = {"mode": SHARED, "last_data": prev,
-                                     "ctrl_since_data": 0, "n_cmds": 0,
-                                     "cmd_index": {},
+                                     "n_cmds": 0, "cmd_index": {},
+                                     "answered": {}, "gaps": 0,
+                                     "sent_gaps": {},
                                      "ended": None, "awaiting": set(),
                                      "known": {t: (0, True) for t in tickers},
                                      "pend": {}, "cmds": {}, "expect": {},
@@ -805,6 +859,7 @@ class WsBooks:
         if a["awaiting"]:
             self.fatal = self.fatal or R_GAP_DURING_RECOVERY
         self.stats["gaps"] += 1
+        a["gaps"] += 1
         last = self.sid_seq.get(sid) or 0
         if data:
             a["last_data"] = max(a["last_data"], seq)
@@ -812,7 +867,6 @@ class WsBooks:
             self.sid_seq[sid] = a["last_data"]
         else:
             self.sid_seq[sid] = max(last, seq)
-        a["ctrl_since_data"] = 0
         need = self.recover.setdefault(sid, set())
         for t in sorted(self.sid_markets.get(sid, ())):
             b = self.books.get(t)
@@ -1058,30 +1112,90 @@ class WsBooks:
             if t not in a["pend"] and t not in a["known"]:
                 a["known"][t] = (0, True)
 
-    def _control_seq(self, a, sid, seq, cid=None) -> str:
+    @staticmethod
+    def _ctrl_bound(a, cid) -> int:
+        """(RC6.2 review, round 3) The highest seq a SEPARATE control counter
+        could carry on the control frame answering our update command `cid`
+        on this subscription (an unknown or missing id: every update command
+        sent on it) -- assumptions C1 / C2 (module docstring): the
+        subscription's own `subscribed` may have taken a number (it carries
+        no seq: whether it counted cannot be seen), each of our j update
+        commands up to `cid` at most one more (C1; replies in command order,
+        C2), and at most CONTROL_SEQ_SLACK the venue sends unasked (C1). It
+        used to be j + CONTROL_SEQ_SLACK: with the `subscribed` and one
+        unasked frame both numbered, the unasked frame landed on the shared
+        slot and a delta lost after it was hidden."""
+        j = a["cmd_index"].get(cid, a["n_cmds"]) if type(cid) is int \
+            else a["n_cmds"]
+        return 1 + j + CONTROL_SEQ_SLACK
+
+    @staticmethod
+    def _answered(a, cid) -> bool:
+        """(RC6.2 review, round 3) Did a reply to our update command `cid`
+        arrive before this one? Records this one (ids of our update commands
+        on the sid only, at most MAX_CMD_INDEX)."""
+        if type(cid) is not int or cid not in a["cmd_index"]:
+            return False
+        if cid in a["answered"]:
+            return True
+        a["answered"][cid] = True
+        while len(a["answered"]) > MAX_CMD_INDEX:
+            a["answered"].pop(next(iter(a["answered"])))
+        return False
+
+    def _control_seq(self, a, sid, seq, cid=None, *, dup=False) -> str:
         """Where a control frame's seq sits in an acknowledged sid's
         sequence (module docstring, THE SEQUENCE RULE FOR CONTROL FRAMES).
-        `cid`: the command it answers (its index among our update commands
-        on the sid bounds a separate counter; unknown: every command sent)."""
+        `cid`: the command it answers (_ctrl_bound); `dup`: a reply to that
+        command arrived before (this one replays it)."""
         if seq is None:
             return "NO_SEQ"
+        bound = self._ctrl_bound(a, cid)
         if a["mode"] == SEPARATE:
+            if seq > bound:
+                # no separate counter reaches it (C1 / C2): the control
+                # frames are in the shared sequence after all. What was lost
+                # meanwhile cannot be known (control frames were not
+                # sequenced): a gap, and the sid is SHARED again from here
+                a["mode"] = SHARED
+                self.stats["control_seq_shared_again"] += 1
+                return "GAP"
+            if seq > a["last_data"] + 1 and self._current_on(sid):
+                # past the data run's next slot with a book CURRENT: what a
+                # shared counter shows after a lost frame (a separate one
+                # only on a sid that carried fewer data than control frames)
+                # -- a gap, never a loss left unseen until the next data
+                # frame (round 3)
+                return "AMBIGUOUS"
             self.stats["control_ignored"] += 1
             return "IGNORED"
         last = self.sid_seq.get(sid) or 0
         if seq == last + 1:
-            # the reply to our j-th update command (unknown command: every
-            # command sent) -- assumptions C1 and C2 (module docstring)
-            j = a["cmd_index"].get(cid, a["n_cmds"]) \
-                if type(cid) is int else a["n_cmds"]
-            if seq > j + CONTROL_SEQ_SLACK or not self._current_on(sid):
+            if seq > bound or not self._current_on(sid):
                 self.sid_seq[sid] = seq
-                a["ctrl_since_data"] += 1
                 self.stats["control_consumed"] += 1
                 return "CONSUMED"
             return "AMBIGUOUS"
         if seq <= last:
-            # a shared counter never repeats a seq: a separate one does
+            # A shared counter gives the FIRST reply to our command a seq
+            # above every frame read before it (one ordered connection) --
+            # unless a frame was lost after the command went out (then the
+            # reply may be a late copy of the lost one, and a gap followed).
+            # So the first reply to a command of ours, with no gap on the sid
+            # since it was sent, at or below the bound, proves a separate
+            # counter. Anything else at or below the last seq -- a second
+            # reply, a frame answering no command we know, one after a gap,
+            # one above the bound -- is a REPLAY of the shared sequence: a
+            # gap while a book of the sid is CURRENT (a break, as a replayed
+            # data frame is), counted otherwise; never a switch (round 3).
+            first = (type(cid) is int and cid in a["cmd_index"] and not dup
+                     and a["sent_gaps"].get(cid) == a["gaps"])
+            if not first or seq > bound:
+                self.stats["control_replayed"] += 1
+                if self._current_on(sid):
+                    return "REPLAYED"
+                self.stats["control_ignored"] += 1
+                return "IGNORED"
             a["mode"] = SEPARATE
             self.sid_seq[sid] = a["last_data"]
             self.stats["control_seq_separate"] += 1
@@ -1092,30 +1206,54 @@ class WsBooks:
     def _legacy_control_seq(self, sid, seq) -> str:
         """(RC6.2 review) A control frame (`ok`, a non-terminal scoped
         error) on a sid never acknowledged as ours, by THE SEQUENCE RULE FOR
-        CONTROL FRAMES: seq == last + 1 is the next slot -- taken while no
-        book of the sid is CURRENT (nothing to hide) or when the seq is past
-        what a separate counter could carry (every command sent on this
-        connection, each answered at most once, + CONTROL_SEQ_SLACK); at or
-        under that with a CURRENT book it is a gap (ambiguous); seq <= last
-        proves a separate counter (the sid's control frames are counted,
-        never sequenced, from then on); past last + 1 is a gap. Such a sid
-        DIES on a gap (the RC6 rule; no command is ever sent for it). RC6.1
-        ignored the frame without advancing the sid, so the next delta was a
-        false gap (contract probe 1). With no sequence yet (nothing but
-        deltas ahead of the first snapshot) the frame is not in it."""
+        CONTROL FRAMES with the bound 1 + every command sent on this
+        connection + CONTROL_SEQ_SLACK (each answered at most once; the
+        sid's own announcement may have taken a number -- round 3): seq ==
+        last + 1 is the next slot -- taken while no book of the sid is
+        CURRENT (nothing to hide) or when the seq is past the bound; at or
+        under it with a CURRENT book it is a gap (ambiguous); past last + 1
+        is a gap. Seq <= last: no command of ours is matched on a number
+        that is not ours, so it is a replay of the shared sequence while a
+        book of the sid is CURRENT (a gap, round 3: it used to switch the
+        sid to separate); with none CURRENT the sid's control frames are
+        counted, never sequenced, from then on (separate) -- and on such a
+        sid a control frame above the bound (shared after all) or past the
+        data run's next slot with a book CURRENT (a shared counter's loss)
+        is a gap. Such a sid DIES on a gap (the RC6 rule; no command is ever
+        sent for it). RC6.1 ignored the frame without advancing the sid, so
+        the next delta was a false gap (contract probe 1). With no sequence
+        yet (nothing but deltas ahead of the first snapshot) the frame is
+        not in it."""
         last = self.sid_seq.get(sid)
-        if seq is None or last is None or sid in self.legacy_separate:
+        bound = 1 + self.conn_cmds + CONTROL_SEQ_SLACK
+        if seq is None or last is None:
+            self.stats["control_ignored"] += 1
+            return "IGNORED"
+        if sid in self.legacy_separate:
+            if seq > bound or (seq > last + 1 and self._current_on(sid)):
+                self.legacy_separate.discard(sid)
+                if seq > bound:
+                    self.stats["control_seq_shared_again"] += 1
+                self._gap_sid(sid, R_SEQ_GAP if seq > bound
+                              else R_CONTROL_SEQUENCE_AMBIGUOUS)
+                return "GAP"
             self.stats["control_ignored"] += 1
             return "IGNORED"
         if seq == last + 1:
-            if seq > self.conn_cmds + CONTROL_SEQ_SLACK or \
-                    not self._current_on(sid):
+            if seq > bound or not self._current_on(sid):
                 self.sid_seq[sid] = seq
                 self.stats["control_consumed"] += 1
                 return "CONSUMED"
             self._gap_sid(sid, R_CONTROL_SEQUENCE_AMBIGUOUS)
             return "GAP"
         if seq <= last:
+            if self._current_on(sid) or seq > bound:
+                self.stats["control_replayed"] += 1
+                if self._current_on(sid):
+                    self._gap_sid(sid, R_SEQ_GAP)
+                    return "GAP"
+                self.stats["control_ignored"] += 1
+                return "IGNORED"
             self.legacy_separate.add(sid)
             self.stats["control_seq_separate"] += 1
             self.stats["control_ignored"] += 1
@@ -1130,10 +1268,13 @@ class WsBooks:
             ok = seq == a["last_data"] + 1
         elif seq == last + 1:
             ok = True
-        elif (seq == a["last_data"] + 1 and a["ctrl_since_data"] >= 1
-              and last == a["last_data"] + a["ctrl_since_data"]):
-            # the data run continues exactly over the control frames just
-            # taken into the sequence: their seq is a separate counter's
+        elif seq == a["last_data"] + 1 and last > a["last_data"]:
+            # the data run continues exactly over the slots control frames
+            # took (or skipped, at a control frame's gap) since the last data
+            # frame: a shared counter never gives a data frame a control
+            # frame's seq, and a frame lost before a later one never arrives
+            # after it -- their seq is a separate counter's (round 3: also
+            # after an ambiguous control frame's gap, whose books are GAP)
             a["mode"] = SEPARATE
             self.stats["control_seq_separate"] += 1
             ok = True
@@ -1141,7 +1282,6 @@ class WsBooks:
             ok = False
         if ok:
             a["last_data"] = seq
-            a["ctrl_since_data"] = 0
             self.sid_seq[sid] = seq
         return ok
 
@@ -1162,7 +1302,10 @@ class WsBooks:
             if code in TERMINAL_ERROR_CODES:
                 return self._end_unscoped()
             for s, x in self.anchors.items():
-                if not x["ended"] and type(cid) is int and cid in x["cmds"]:
+                if not x["ended"] and type(cid) is int and (
+                        cid in x["cmds"] or cid in x["cmd_index"]):
+                    # (round 3) its reply: a later one is a replay
+                    self._answered(x, cid)
                     self._settle(x, s, cid, "error", m, code)
                     break
             return "ERROR"
@@ -1203,10 +1346,11 @@ class WsBooks:
         # (a frame after a loss is still the venue's own word on it)
         self._settle(a, sid, cid, typ, m, code)
         seq = m.get("seq")
-        out = self._control_seq(a, sid, seq, cid)
-        if out in ("GAP", "AMBIGUOUS"):
-            self._gap_acked(a, sid, R_SEQ_GAP if out == "GAP"
-                            else R_CONTROL_SEQUENCE_AMBIGUOUS, seq,
+        out = self._control_seq(a, sid, seq, cid,
+                                dup=self._answered(a, cid))
+        if out in ("GAP", "AMBIGUOUS", "REPLAYED"):
+            self._gap_acked(a, sid, R_CONTROL_SEQUENCE_AMBIGUOUS
+                            if out == "AMBIGUOUS" else R_SEQ_GAP, seq,
                             data=False)
             return "GAP"
         return "ERROR" if typ == "error" else "OK"
@@ -1333,8 +1477,11 @@ class WsBooks:
         if cid is None:
             return
         a["cmd_index"][cid] = a["n_cmds"]
+        a["sent_gaps"][cid] = a["gaps"]
         while len(a["cmd_index"]) > MAX_CMD_INDEX:
             a["cmd_index"].pop(next(iter(a["cmd_index"])))
+        while len(a["sent_gaps"]) > MAX_CMD_INDEX:
+            a["sent_gaps"].pop(next(iter(a["sent_gaps"])))
         if action not in ("add_markets", "delete_markets"):
             return
         a["cmds"][cid] = (action, tuple(tickers))

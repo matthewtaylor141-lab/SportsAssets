@@ -395,6 +395,11 @@ def _rewant_steps(want):
             lambda v_: (want.remove(B), v_.sub.forget([B])), "idle",
             lambda v_: want.append(B), "idle",
             "deliver",                                # B's PRE-delete snap
+            # (round 3) A moves once more before the venue reads the delete:
+            # the sid has carried more frames than the separate-counter
+            # bound (the subscribe's reply counted) when the replies come,
+            # so they are shared slots, not the guard's documented false gap
+            lambda v_: v_.activity(A, "0.43", "2"), "deliver",
             "process",                                # the delete: ok [A]
             lambda v_: v_.activity(B, "0.45", "99"),  # not streamed
             lambda v_: v_.activity(A, "0.41", "4"),
@@ -514,6 +519,12 @@ def test_a_gap_while_an_add_is_unanswered_and_its_refused_readd_still_converge()
     v = MemberVenue(refuse27_at={2, 3})
     want = [A]
     steps = ["process", "deliver", "deliver",
+             # (round 3) A moves twice first: the sid has carried more
+             # frames than the separate-counter bound (the subscribe's
+             # reply counted) when the refusals come -- shared slots, not
+             # the guard's documented false gap
+             lambda v_: v_.activity(A, "0.43", "2"), "deliver",
+             lambda v_: v_.activity(A, "0.44", "3"), "deliver",
              lambda v_: want.append(B), "idle",       # add B
              "process", "lose",                       # its ok lost
              "deliver",                               # B's snap: the gap

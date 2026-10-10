@@ -149,8 +149,13 @@ def _drained(v):
 # ── one subscribe, add_markets bound when sent ──────────────────────────
 
 def test_one_subscribe_then_add_markets_bound_when_sent(monkeypatch):
-    monkeypatch.setattr(KWS, "SUBSCRIBE_CHUNK", 2)
-    ts = ["K-%d" % i for i in range(5)]
+    """(RC6.2 review, round 3: chunks of 3 over 7 markets, they were 2 over
+    5 -- with the subscribe's own reply counted in the separate-counter
+    bound, a 2-market sid's first `ok` at seq 3 is the guard's documented
+    false gap; this test is about the commands, so the sid carries one
+    more frame before it. Every assertion unchanged.)"""
+    monkeypatch.setattr(KWS, "SUBSCRIBE_CHUNK", 3)
+    ts = ["K-%d" % i for i in range(7)]
     v = SR.DocVenue()
     bound = {}
 
@@ -163,10 +168,10 @@ def test_one_subscribe_then_add_markets_bound_when_sent(monkeypatch):
     assert v.commands() == [("subscribe", None)] + [
         ("update_subscription", "add_markets")] * 2
     assert [m["params"]["market_tickers"] for m in v.sent] == [
-        ts[:2], ts[2:4], ts[4:]]
+        ts[:3], ts[3:6], ts[6:]]
     assert all(m["params"].get("sid") == 1 for m in v.sent[1:])
     assert bound["at_ack"] == ts
-    assert seen["counts"]["current"] == 5 and books.stats["gaps"] == 0
+    assert seen["counts"]["current"] == 7 and books.stats["gaps"] == 0
     assert books.stats["control_consumed"] == 2
 
 
@@ -307,10 +312,20 @@ def test_a_control_frame_past_any_separate_counter_is_a_shared_slot():
 
 
 def test_a_separate_counter_is_learned_from_the_first_control_frame():
+    """(RC6.2 review, round 3: the two `ok`s now answer update commands the
+    books recorded -- commands 9 and 10 sent on the sid. The proof of a
+    separate counter is the FIRST reply to a command of ours, with no gap
+    since it was sent, at or below the last seq: a shared counter gives that
+    reply a seq above every frame read before it. A frame answering no
+    command we know, at or below the last seq, is a replay of the shared
+    sequence -- tests/test_rc62_kalshi_ws_control_frames pins that. Every
+    assertion unchanged.)"""
     b = KWS.WsBooks(clock=lambda: NOW)
     b.want(["K-A"])
     b.on_connected()
     b.bind(1, ["K-A"])
+    b.command_sent(1, 9)
+    b.command_sent(1, 10)
     b.on_message(snap(1, 1, "K-A"))
     b.on_message(delta(1, 2, "K-A"))
     assert b.on_message(ok(9, 1, 1)) == "OK"          # at or below last
@@ -423,18 +438,23 @@ class _Forgetful(SR.DocVenue):
 
 def test_a_market_the_venues_list_lacks_is_gap_and_added_again_once(
         monkeypatch):
-    monkeypatch.setattr(KWS, "SUBSCRIBE_CHUNK", 2)
-    ts = ["K-A", "K-B", "K-C", "K-D"]
-    v = _Forgetful({"K-D"})
+    """(RC6.2 review, round 3: chunks of 3 over A..E, E never held; they
+    were 2 over A..D, D never held -- the subscribe's own reply now counts
+    in the separate-counter bound, so a 2-market sid's first `ok` is the
+    guard's documented false gap. Every assertion unchanged but for the
+    names.)"""
+    monkeypatch.setattr(KWS, "SUBSCRIBE_CHUNK", 3)
+    ts = ["K-A", "K-B", "K-C", "K-D", "K-E"]
+    v = _Forgetful({"K-E"})
     sub, books, seen = drive(v, ts, until=_drained(v))
     assert v.commands() == [("subscribe", None),
                             ("update_subscription", "add_markets"),
                             ("update_subscription", "add_markets")]
-    assert v.sent[1]["params"]["market_tickers"] == ["K-C", "K-D"]
-    assert v.sent[2]["params"]["market_tickers"] == ["K-D"]    # once
-    assert seen["books"]["K-D"]["why"] == KWS.R_NOT_HELD_BY_VENUE
-    assert not seen["books"]["K-D"]["ok"]
-    assert all(seen["books"][t]["ok"] for t in ts[:3])
+    assert v.sent[1]["params"]["market_tickers"] == ["K-D", "K-E"]
+    assert v.sent[2]["params"]["market_tickers"] == ["K-E"]    # once
+    assert seen["books"]["K-E"]["why"] == KWS.R_NOT_HELD_BY_VENUE
+    assert not seen["books"]["K-E"]["ok"]
+    assert all(seen["books"][t]["ok"] for t in ts[:4])
     assert books.stats["gaps"] == 0
 
 
@@ -856,16 +876,20 @@ def test_a_refused_get_snapshot_is_asked_again_and_a_second_refusal_ends():
 
 
 def test_a_refused_add_markets_is_added_again_once(monkeypatch):
-    monkeypatch.setattr(KWS, "SUBSCRIBE_CHUNK", 2)
-    ts = ["K-A", "K-B", "K-C"]
+    """(RC6.2 review, round 3: chunks of 3 over A..D, D added; they were 2
+    over A..C, C added -- a 2-market sid's first reply is now the
+    separate-counter guard's documented false gap. The same assertions,
+    counted over one more market.)"""
+    monkeypatch.setattr(KWS, "SUBSCRIBE_CHUNK", 3)
+    ts = ["K-A", "K-B", "K-C", "K-D"]
     v = _Refusing("add_markets", 1)
     sub, books, seen = drive(v, ts, until=_drained(v))
     assert [c[1] for c in v.commands()] == [None, "add_markets",
                                             "add_markets"]
-    assert seen["counts"]["current"] == 3
+    assert seen["counts"]["current"] == 4
     v2 = _Refusing("add_markets", 2)
     sub2, books2, seen2 = drive(v2, ts, until=_drained(v2))
     assert [c[1] for c in v2.commands()] == [None, "add_markets",
                                              "add_markets"]
-    assert seen2["books"]["K-C"]["why"] == KWS.R_NOT_HELD_BY_VENUE
-    assert seen2["counts"]["current"] == 2
+    assert seen2["books"]["K-D"]["why"] == KWS.R_NOT_HELD_BY_VENUE
+    assert seen2["counts"]["current"] == 3
