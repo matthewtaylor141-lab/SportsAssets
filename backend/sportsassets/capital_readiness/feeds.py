@@ -1074,7 +1074,18 @@ async def gate_xavier_complete(conn, ctx) -> dict:
     incomplete position, the currency reason (packet_incomplete_why), the
     live protection state and the newest review's missing elements, and the
     whole counts (applicable, complete now, excluded as EXTERNAL_UNAVAILABLE).
-    The verdict, the rule and the strategies' integrity are unchanged."""
+    The rule and the strategies' integrity are unchanged.
+
+    AN EXTERNAL_UNAVAILABLE POSITION IS COUNTED, NOT COMPLETE (RC6.2
+    p-xavier M-2). The strategy integrity (the allocation rail, unchanged)
+    leaves positions whose venue market is terminal or not open out of its
+    applicable set; this gate took its verdict from that set alone, so it
+    could read GREEN while such a position -- held, in the scorecard's
+    population (paper_freshness open_positions counts every open position)
+    -- had no complete current packet, and the judge's rate x held then
+    counted that member complete. Each one is now counted as not complete,
+    named in the blockers, and in counted_open_positions; the gate is GREEN
+    only when every open position has a complete current packet."""
     from .. import bettor_paper_freshness as FR
     from .. import bettor_paper_ledger as L
     pos = await L.positions(conn, ctx["account_id"])
@@ -1082,22 +1093,30 @@ async def gate_xavier_complete(conn, ctx) -> dict:
                          for p in pos})
     incomplete, per = [], {}
     why, prot, excluded = [], [], []
-    applicable = complete_now = 0
+    applicable = complete_now = excluded_n = 0
     for s in strategies:
         iv = await FR.strategy_management_integrity(
             conn, ctx["account_id"], s, now=ctx["now"])
         per[s] = {"open_positions": iv.get("open_positions"),
                   "packet_incomplete_rate": iv.get("packet_incomplete_rate"),
-                  "packet_complete_now": iv.get("packet_complete_now_count")}
+                  "packet_complete_now": iv.get("packet_complete_now_count"),
+                  "external_unavailable": iv.get(
+                      "excluded_external_unavailable_count")}
         incomplete += list(iv.get("packet_incomplete") or [])
         why += list(iv.get("packet_incomplete_why") or [])
         prot += list(iv.get("protection_not_valid") or [])
-        excluded += list(iv.get("excluded_external_unavailable") or [])
+        ex = list(iv.get("excluded_external_unavailable") or [])
+        excluded += ex
+        excluded_n += int(iv.get("excluded_external_unavailable_count")
+                          or len(ex))
         applicable += int(iv.get("open_positions") or 0)
         complete_now += int(iv.get("packet_complete_now_count") or 0)
+    # every excluded member is counted, never complete (named, bounded list)
+    why += [{"position_key": k, "why": XAVIER_EXTERNAL_UNAVAILABLE}
+            for k in excluded]
     missing = {}
     groups = sorted({p["group_id"] for p in pos
-                     if p["position_key"] in set(incomplete)})
+                     if p["position_key"] in set(incomplete) | set(excluded)})
     if groups:
         try:
             async with conn.transaction():
@@ -1119,19 +1138,58 @@ async def gate_xavier_complete(conn, ctx) -> dict:
         p = by_key.get(x["position_key"]) or {}
         blockers.append({
             "position_key": x["position_key"], "why": x["why"],
-            "protection_state": pstate.get(x["position_key"],
-                                           FR.PS_PROTECTED),
+            "protection_state": (
+                PROTECTION_NOT_JUDGED_EXTERNAL
+                if x["why"] == XAVIER_EXTERNAL_UNAVAILABLE else
+                pstate.get(x["position_key"], FR.PS_PROTECTED)),
             "latest_review_missing": missing.get(p.get("group_id"))})
-    return _gate(not incomplete, "XAVIER_PACKETS_INCOMPLETE",
+    return _gate(not incomplete and excluded_n == 0,
+                 "XAVIER_PACKETS_INCOMPLETE",
                  open_positions=len(pos), strategies=per,
-                 packet_incomplete=incomplete[:20],
+                 packet_incomplete=(incomplete + excluded)[:20],
                  applicable_open_positions=applicable,
+                 # EVERY open position this gate counts: the applicable ones
+                 # and the EXTERNAL_UNAVAILABLE ones (never complete)
+                 counted_open_positions=applicable + excluded_n,
                  complete_current_packets=complete_now,
                  excluded_external_unavailable=excluded[:20],
+                 external_unavailable_counted_not_complete=excluded_n,
                  blockers=blockers,
                  blockers_unread=missing.get("_unread"),
                  rule=FR.PACKET_CURRENCY_RULE,
                  source="bettor_paper_freshness.strategy_management_integrity")
+
+
+#: an open position whose venue market is terminal or not open
+#: (bettor_paper_freshness EXTERNAL_UNAVAILABLE): counted by xavier_complete,
+#: never complete (M-2)
+XAVIER_EXTERNAL_UNAVAILABLE = "EXTERNAL_UNAVAILABLE_MARKET_COUNTED_NOT_COMPLETE"
+PROTECTION_NOT_JUDGED_EXTERNAL = "NOT_JUDGED_MARKET_EXTERNAL_UNAVAILABLE"
+
+
+def xavier_complete_rate(gate: dict | None) -> float | None:
+    """THE READINESS RATE OF THE xavier_complete GATE (RC6.2 p-xavier M-1).
+    The gate is strict (any incomplete member refuses), so the rate stays
+    binary: 1.0 only when it is GREEN over at least one counted open
+    position, 0.0 when it is RED. None -- UNMEASURED, so a readiness that
+    needs the rate keeps its blocker named -- when there is no gate, or when
+    it counted no open position: a GREEN over nothing is vacuous, not
+    complete. (Before this, completion readiness and the pm-acceptance
+    binding both mapped a GREEN gate to 1.0 whatever it counted, so with
+    nothing held XAVIER_PACKET_COMPLETENESS_BELOW_TARGET vanished without
+    evidence.) Pure; no threshold here."""
+    if not gate or "value" not in gate:
+        return None
+    if gate.get("value") is not True:
+        return 0.0
+    ev = gate.get("evidence") if isinstance(gate.get("evidence"), dict) \
+        else {}
+    counted = ev.get("counted_open_positions", ev.get("open_positions"))
+    try:
+        counted = int(counted)
+    except (TypeError, ValueError):
+        return None
+    return 1.0 if counted > 0 else None
 
 
 async def gate_production_canary_clean(conn, ctx) -> dict:

@@ -106,6 +106,7 @@ import re
 import time
 
 from . import allie_capital as AC
+from . import open_position_canon as OPC
 from . import position_rooms as PR
 
 VERSION = "EVIDENCED_CORRELATION_GRAPH_V2"
@@ -194,19 +195,18 @@ ORDER_REFUSED_FINDING = "PAPER_RISK_REFUSED_THE_ORDER"
 OWNER_POLICY_ACCOUNT = "paper_acct_main"
 OWNER_POLICY_ENTRY_USD = 1000.0
 
-#: ALLIE'S FIXTURE INPUT, VERBATIM (canonical_components.allie_at_decision;
-#: a test pins the two texts equal). The graph's "current treatment" of a
-#: candidate is THIS query's answer fed through allie_capital's own haircut
-#: rule -- or, where the candidate's canonical intent exists, the allie
-#: component it recorded -- never a re-derivation that counts differently
-#: (review, R30C: the V1 graph counted unfilled working orders and matched on
-#: the catalogue event, which Allie does not).
-ALLIE_FIXTURE_SQL = """SELECT count(DISTINCT o.group_id) AS n,
-                      coalesce(sum(o.filled_qty * o.limit_price), 0) AS usd
-                 FROM paper_orders o
-                WHERE o.role = 'ENTRY' AND o.fixture = $1 AND o.filled_qty > 0
-                  AND NOT EXISTS (SELECT 1 FROM paper_settlements s
-                                   WHERE s.group_id = o.group_id)"""
+#: ALLIE'S FIXTURE INPUT, THE SAME STATEMENT (canonical_components
+#: .allie_at_decision executes open_position_canon.OPEN_EXPOSURE_FIXTURE_SQL;
+#: a test pins that and that this IS that object). The graph's "current
+#: treatment" of a candidate is THIS query's answer fed through
+#: allie_capital's own haircut rule -- or, where the candidate's canonical
+#: intent exists, the allie component it recorded -- never a re-derivation
+#: that counts differently (review, R30C: the V1 graph counted unfilled
+#: working orders and matched on the catalogue event, which Allie does not).
+#: RC6.3 allie-exposure: "open" is the canonical open QUANTITY of each
+#: position (bought - sold - settled), not "the group has no settlement
+#: row" (an exited-to-zero position never gets one). $1 account, $2 fixture.
+ALLIE_FIXTURE_SQL = OPC.OPEN_EXPOSURE_FIXTURE_SQL
 
 #: The worst-case controls in force, restated by name (the paper ledger and
 #: the funded rails are writer / execution modules this read-only module does
@@ -1374,10 +1374,12 @@ async def _cap_candidates(conn, account_id: str, at: float) -> list:
     return out
 
 
-async def _allie_treatments(conn, nodes: list) -> dict:
+async def _allie_treatments(conn, nodes: list,
+                            account_id: str | None = None) -> dict:
     """Each candidate's CURRENT correlation treatment, from Allie's own
     records: the allie component its canonical intent recorded, else Allie's
-    fixture query run now through allie_capital's haircut rule."""
+    fixture query run now through allie_capital's haircut rule, on the
+    book of `account_id` (None: every paper account's)."""
     out: dict = {}
     cands = [n for n in nodes if n["kind"] == K_CANDIDATE][
         :MAX_CANDIDATE_NODES]
@@ -1416,15 +1418,17 @@ async def _allie_treatments(conn, nodes: list) -> dict:
                 "fixture_open_usd": 0.0}
             continue
         if fx not in by_fx:
-            r = await conn.fetchrow(ALLIE_FIXTURE_SQL, fx)
+            r = await conn.fetchrow(ALLIE_FIXTURE_SQL, account_id, fx)
             by_fx[fx] = (int(r["n"] or 0), float(r["usd"] or 0))
         k, usd = by_fx[fx]
         out[n["node_id"]] = {
             "status": "ALLIE_QUERY_RUN_AT_THIS_READ",
             "source": ("canonical_components.allie_at_decision's fixture "
-                       "query (ALLIE_FIXTURE_SQL, verbatim) on fixture %r, "
+                       "query (ALLIE_FIXTURE_SQL, the same statement, open = "
+                       "canonical open quantity) on fixture %r, account %s, "
                        "through allie_capital's haircut rule min(1, %.2f x "
-                       "open groups)" % (fx, AC.CORRELATION_HAIRCUT)),
+                       "open groups)" % (fx, account_id or "ALL",
+                                         AC.CORRELATION_HAIRCUT)),
             "allie_haircut": _f(min(1.0, AC.CORRELATION_HAIRCUT * k), 4),
             "fixture_open_groups": k, "fixture_open_usd": _f(usd, 2),
             "fixture_headroom_usd": _f(max(0.0, AC.FIXTURE_CAP_USD - usd), 2)}
@@ -1475,7 +1479,7 @@ async def read(conn, *, now: float | None = None,
                                   else int(r["long_won"]))})
     nodes = build_nodes(raw, premap, vals, now=at, fixtures=fixtures,
                         candidates=cands)
-    treatments = await _allie_treatments(conn, nodes)
+    treatments = await _allie_treatments(conn, nodes, acct)
     return {"ok": True, "at": at, "account_id": acct, "nodes": nodes,
             "dependence": measured_dependence(hist),
             "treatments": treatments, "samples": int(samples),

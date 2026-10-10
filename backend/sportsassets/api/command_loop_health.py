@@ -14,7 +14,9 @@ it a single writer (with the backends that hold its advisory key right now,
 read from pg_locks), last start / success / error, lag, and the verdict:
 HEALTHY / UNHEALTHY (no success within 3 x cadence; none since a start more
 than 3 x cadence ago; the newest record a failed pass; or a critical armed
-loop's writer lock held by no backend) / STARTING (started < 3 x cadence
+loop's writer lock held by no backend) / DEGRADED (RC6.2: the newest
+success is a heartbeat whose detail records phase_errors; named
+LATEST_RUN_PHASE_ERRORS:<phase>:<err>) / STARTING (started < 3 x cadence
 ago, no success yet) / DISABLED (named) / EVENT_DRIVEN / UNAVAILABLE (named:
 sources unreadable or absent). A heartbeat counts as a success only when its
 status is in its writer's success vocabulary; no source ever reads as a

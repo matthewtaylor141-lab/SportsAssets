@@ -529,6 +529,19 @@ def _sql_in(path: pathlib.Path, func: str, needle: str) -> str:
     raise AssertionError("no SQL with %r in %s.%s" % (needle, path, func))
 
 
+def _attrs_in(path: pathlib.Path, func: str) -> set:
+    """Every attribute / name a function's body mentions."""
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                node.name == func:
+            return ({c.attr for c in ast.walk(node)
+                     if isinstance(c, ast.Attribute)}
+                    | {c.id for c in ast.walk(node)
+                       if isinstance(c, ast.Name)})
+    raise AssertionError("no function %s in %s" % (func, path))
+
+
 def test_the_restated_constants_are_their_sources_own():
     from sportsassets import bettor_paper_ledger as L
     from sportsassets import bettor_paper_limits as LIMITS
@@ -558,10 +571,25 @@ def test_the_restated_constants_are_their_sources_own():
         want = (eff["entry"]["target_order_usd"] if cap is None
                 else min(eff["entry"]["target_order_usd"], cap))
         assert CG.order_budget_usd(cfg, acct) == want, (cfg, acct)
-    # ALLIE'S FIXTURE QUERY, VERBATIM
-    got = _sql_in(SRC / "canonical_components.py", "allie_at_decision",
-                  "count(DISTINCT o.group_id)")
-    assert " ".join(got.split()) == " ".join(CG.ALLIE_FIXTURE_SQL.split())
+    # ALLIE'S FIXTURE QUERY, THE SAME STATEMENT (RC6.3 allie-exposure: both
+    # execute open_position_canon's canonical-open-quantity statement; the
+    # graph's constant IS that object, and allie_at_decision executes it by
+    # name with no inline SQL of its own to drift from it)
+    from sportsassets import open_position_canon as OPC
+    assert CG.ALLIE_FIXTURE_SQL is OPC.OPEN_EXPOSURE_FIXTURE_SQL
+    assert "OPEN_EXPOSURE_FIXTURE_SQL" in _attrs_in(
+        SRC / "canonical_components.py", "allie_at_decision")
+    assert "OPEN_EXPOSURE_BOOK_SQL" in _attrs_in(
+        SRC / "canonical_components.py", "allie_at_decision")
+    for needle in ("paper_settlements", "paper_orders", "NOT EXISTS"):
+        try:
+            _sql_in(SRC / "canonical_components.py", "allie_at_decision",
+                    needle)
+        except AssertionError:
+            continue
+        raise AssertionError("allie_at_decision carries inline SQL with %r: "
+                             "her exposure inputs are open_position_canon's"
+                             % needle)
     # THE FUNDED CORRELATED-EXPOSURE RAIL, pinned to its source text (an
     # execution module this read-only module and this test do not import)
     ee = (SRC / "bettor_entry_execution.py").read_text()

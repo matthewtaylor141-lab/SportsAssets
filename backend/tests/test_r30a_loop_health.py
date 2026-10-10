@@ -97,6 +97,7 @@ def test_every_api_lifespan_runner_is_inventoried():
         "_SCOUT.run": "agents.scout_runner", "_EXM.run": "execmirror.tick",
         "_ADRIANA.run": "agents.adriana_runner",
         "_REDTEAM.run": "redteam.runner",
+        "_KSHADOW.run": "kalshi_shadow.runner",
         "_INTEL.run": "intel.runner", "_POS.run": "profitability.runner",
         "_POSLEARN.run": "position_learning.runner",
         "_TWIN.run": "twin.runner",

@@ -116,3 +116,11 @@ orders), `fills` (simulated entry fills), `handoffs`.
 
 `daily_reports` (latest version per America/New_York day; see
 `agents.paper_audrey` for the report fields) and `audit_entries` (findings).
+
+Beside the sections, `days_not_reconciled` (not a section; the page does not
+read it): `{kind: "AUDREY_DAY_NOT_RECONCILED", count, days: [{session_id,
+day, found_at, activity_total, improvement_task_id}] newest first, at most
+`limit`, basis, why}`. `count` is every such finding of the account: a
+completed day with paper activity and no Audrey report, one per session and
+day (no report is written for it after the fact). On a failed read, `count`
+and `days` are null and `why` names the exception.

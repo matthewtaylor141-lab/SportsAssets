@@ -22,6 +22,19 @@ FRESH, INT = "FRESHNESS_PLUMBING", "INTEGRITY"
 EDGE, EV, PRICE, DEPTH, RAIL = "EDGE", "EV", "PRICE", "DEPTH", "RISK_RAIL"
 
 TABLE = {
+    # (rc6.3 capability) why an assigned research review was not a genuine
+    # grounded review, by name (capability_work.incomplete_reason): the
+    # persona refused or the directive path answered instead (912 Audrey
+    # reviews REQUIRES_OPERATOR_CREDENTIAL in production), the model's answer
+    # was not used (its provider failure: HTTP_400 55 times, or a guard),
+    # no model is configured, the reply was interrupted, the persona errored,
+    # or an answer that cited no paper record or investigation item
+    "NO_GENUINE_GROUNDED_REVIEW": (S, DATA, "OUT_OF_FUNNEL"),
+    "REVIEW_PERSONA_REFUSED": (S, CAP, "OUT_OF_FUNNEL"),
+    "REVIEW_MODEL_ANSWER_NOT_USED": (S, DATA, "OUT_OF_FUNNEL"),
+    "REVIEW_MODEL_UNAVAILABLE": (S, CAP, "OUT_OF_FUNNEL"),
+    "REVIEW_PERSONA_INTERRUPTED": (S, DATA, "OUT_OF_FUNNEL"),
+    "REVIEW_PERSONA_ERROR": (S, INT, "OUT_OF_FUNNEL"),
     # (RC5, economic funnel F2/F3 2026-10-08) codes that reached production
     # records unclassified, so the funnel could not class its stopping
     # points: exploration sizing found no quantity at the best level
@@ -41,6 +54,26 @@ TABLE = {
     "NO_ELIGIBLE_ROUTE": (S, DATA, "VENUE_BOOK"),
     "INSUFFICIENT_DEPTH": (E, DEPTH, "VENUE_BOOK"),
     "NO_BOOK": (S, DATA, "VENUE_BOOK"),
+    # (rc6.3 route-book) the canonical route's PMUS book, judged at routing
+    # time (canonical_claims_db.route_books): older than the route bound,
+    # another market's book, the venue's own not-open state (data, as
+    # MARKET_NOT_OPEN's row), a crossed book, no receipt instant, a failed
+    # on-demand read, a read deferred with nothing sent while the venue's
+    # hold or 429 cooldown is in force (as VENUE_429_COOLDOWN_NORMAL_READ_
+    # DEFERRED's row), or no read left in the pass's bounded budget -- each
+    # a route candidate with no book, never costed
+    "PMUS_ROUTE_BOOK_OLDER_THAN_THE_ROUTE_BOUND": (S, FRESH, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_IS_NOT_THE_ALIAS_MARKET": (S, INT, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_MARKET_NOT_OPEN": (S, DATA, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_CROSSED": (S, INT, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_HAS_NO_RECEIPT_INSTANT": (S, INT, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_READ_FAILED": (S, DATA, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_READ_DEFERRED_VENUE_HOLD": (S, FRESH, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_NOT_READ_PASS_BUDGET_SPENT": (S, FRESH, "VENUE_BOOK"),
+    # (rc6.3 route-book review 1) the venue's newest word says the market is
+    # not open, older than the route bound and inside the 900 s (ended:
+    # 3600 s) hold: not read again yet (data, as MARKET_NOT_OPEN's row)
+    "PMUS_ROUTE_BOOK_HELD_VENUE_SAID_NOT_OPEN": (S, DATA, "VENUE_BOOK"),
     # (RC5 Xavier no-growth) a canonical held position with no Xavier
     # handoff is named in the management census (ours: a handoff gap), and
     # a protection that cannot be priced is recorded instead of raising
@@ -1770,6 +1803,20 @@ INLINE = {
     "NO_VENUE_CONTRACT_SO_NO_LADDER": (S, MAP, "VENUE_MAPPING"),
     "PAPER_PASS_HAD_NO_CONNECTION": (S, DATA, "AGENT_EVALUATION"),
     "PAPER_PASS_RAISED_OR_TIMED_OUT": (S, INT, "AGENT_EVALUATION"),
+    # (rc6.3b pass-stall) a paper-pass step is bounded by the pass time left
+    # (HARD_TIMEOUT_S less the record's reserve): cancelled past it, and every
+    # later step named as not run -- so one step can never erase the pass's
+    # own health record and heartbeat
+    "PAPER_STEP_EXCEEDED_PASS_TIME": (S, INT, "AGENT_EVALUATION"),
+    "PAPER_STEP_SKIPPED_PASS_TIME_SPENT": (S, CAP, "AGENT_EVALUATION"),
+    # (rc6.3b pass-stall) the coverage step's own bounded outcomes: its run
+    # cut at its budget or raised (the watermark still advances, so it backs
+    # off for REFRESH_EVERY_S), given no pass time to run in, and snapshots
+    # older than the refresh interval reported stale by name
+    "COVERAGE_RUN_EXCEEDED_ITS_BUDGET": (S, CAP, "ACCOUNTING"),
+    "COVERAGE_RUN_FAILED": (S, INT, "ACCOUNTING"),
+    "COVERAGE_SNAPSHOTS_STALE": (S, FRESH, "ACCOUNTING"),
+    "COVERAGE_STEP_HAD_NO_PASS_TIME": (S, CAP, "ACCOUNTING"),
     # Xavier's held measure: an ok feed read naming no change instant is
     # not evidence of currency (paper_benchmark.xavier_measure)
     "PINNAPI_FEED_READ_CARRIED_NO_CHANGE_INSTANT": (S, FRESH, "FRESHNESS"),
@@ -2791,3 +2838,59 @@ ECON_BINDING_STREAM = {
 }
 for _k, _v in ECON_BINDING_STREAM.items():
     TABLE.setdefault(_k, _v)
+
+#: (rc6.3 kalshi-shadow) THE KALSHI SHADOW PLANNER'S NAMED EXCLUSIONS
+#: (kalshi_shadow, written to migration 367's kalshi_shadow_intents; SHADOW
+#: only, never an order). A missing certified counterpart, an ambiguous one,
+#: a counterpart kalshi_orders cannot buy (a NO leg only), an unreadable
+#: plan input, a missing fair probability, an unknown fee schedule and an
+#: unreadable book are SOFTWARE (mapping / capability / data / integrity /
+#: freshness); a stale decision or book is FRESHNESS; the 1:1000 size below
+#: the venue minimum, the per-order cap and the account's cash are RISK
+#: rails at the order; an off-tick-range or crossing price, no ask at the
+#: limit, too little depth at the limit, and a non-positive net EV (with or
+#: without the fee) are ECONOMIC. (r2) A decision of a strategy or policy
+#: version outside the owner's live-eligibility allowlist is the same RISK
+#: rail at admission as STRATEGY_NOT_LIVE_ELIGIBLE; a paper order past its
+#: own expiry at plan time is FRESHNESS, like a stale decision.
+KALSHI_SHADOW_STREAM = {
+    "KALSHI_SHADOW_STRATEGY_NOT_LIVE_ELIGIBLE": (E, RAIL, "RISK_ADMISSION"),
+    "KALSHI_SHADOW_PAPER_ORDER_EXPIRED_BEFORE_PLAN": (S, FRESH, "FRESHNESS"),
+    "KALSHI_SHADOW_NO_CERTIFIED_COUNTERPART": (S, MAP, "VENUE_MAPPING"),
+    "KALSHI_SHADOW_COUNTERPART_ONLY_A_NO_LEG": (S, CAP, "VENUE_MAPPING"),
+    "KALSHI_SHADOW_COUNTERPART_AMBIGUOUS": (S, MAP, "VENUE_MAPPING"),
+    "KALSHI_SHADOW_MAPPING_NOT_ESTABLISHED": (S, MAP, "VENUE_MAPPING"),
+    "KALSHI_SHADOW_BELOW_VENUE_MINIMUM": (E, RAIL, "ORDER"),
+    "KALSHI_SHADOW_ABOVE_ORDER_CAP": (E, RAIL, "ORDER"),
+    "KALSHI_SHADOW_INSUFFICIENT_CASH": (E, RAIL, "RISK_ADMISSION"),
+    "KALSHI_SHADOW_UNSUPPORTED_ORDER": (S, CAP, "ORDER"),
+    "KALSHI_SHADOW_PRICE_OUT_OF_RANGE": (E, PRICE, "ORDER"),
+    "KALSHI_SHADOW_POST_ONLY_WOULD_CROSS": (E, PRICE, "ORDER"),
+    "KALSHI_SHADOW_POST_ONLY_BOOK_UNKNOWN": (S, DATA, "VENUE_BOOK"),
+    "KALSHI_SHADOW_PLAN_EXCLUDED": (S, INT, "ORDER"),
+    "KALSHI_SHADOW_NO_FAIR_PROBABILITY": (S, DATA, "PROBABILITY"),
+    "KALSHI_SHADOW_DECISION_STALE_AT_PLAN": (S, FRESH, "FRESHNESS"),
+    "KALSHI_SHADOW_BOOK_UNAVAILABLE": (S, DATA, "VENUE_BOOK"),
+    "KALSHI_SHADOW_BOOK_STALE": (S, FRESH, "FRESHNESS"),
+    "KALSHI_SHADOW_NOT_EXECUTABLE_AT_LIMIT": (E, PRICE, "VENUE_BOOK"),
+    "KALSHI_SHADOW_INSUFFICIENT_DEPTH_AT_LIMIT": (E, DEPTH, "VENUE_BOOK"),
+    "KALSHI_SHADOW_FEE_TERMS_UNKNOWN": (S, DATA, "EV"),
+    "KALSHI_SHADOW_FEE_MAKES_EV_NEGATIVE": (E, EV, "EV"),
+    "KALSHI_SHADOW_EV_NOT_POSITIVE": (E, EV, "EV"),
+}
+for _k, _v in KALSHI_SHADOW_STREAM.items():
+    TABLE.setdefault(_k, _v)
+#: the SHADOW planner's own runner states (heartbeat / account-read
+#: records): why a pass recorded nothing, or why no account was read --
+#: never a decision, order or collector refusal
+_KSH_RUNNER = ("kalshi_shadow (rc6.3 kalshi-shadow): a SHADOW planner runner "
+               "state (stood down while a Kalshi live-money switch is on or "
+               "its tables are absent, or the read-only account read timed "
+               "out) -- recorded in its heartbeat / kalshi_shadow_account_"
+               "reads, never a trading, decision, order or collector refusal")
+for _k in ("KALSHI_SHADOW_STOOD_DOWN_CONTROL_ENABLED",
+           "KALSHI_SHADOW_STOOD_DOWN_ENV_SWITCH_ON",
+           "KALSHI_SHADOW_STOOD_DOWN_SMALL_LIVE_NOT_SHADOW",
+           "KALSHI_SHADOW_SCHEMA_ABSENT",
+           "KALSHI_SHADOW_ACCOUNT_READ_TIMEOUT"):
+    NOT_REFUSAL.setdefault(_k, _KSH_RUNNER)

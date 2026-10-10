@@ -451,7 +451,7 @@ def test_position_rows_from_the_ledger():
 # ── §3 the verdict ───────────────────────────────────────────────────
 
 def _resolved(xs, *, sleeve="INVESTMENT", at=SINCE + 60):
-    return [_pos("v%d_%s" % (i, uuid.uuid4().hex[:4]), sleeve=sleeve,
+    return [_pos("v%d_%s" % (i, uuid.uuid4().hex), sleeve=sleeve,
                  at=at + i, realized=x, released=at + i + 30)
             for i, x in enumerate(xs)]
 

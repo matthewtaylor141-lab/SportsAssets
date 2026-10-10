@@ -512,24 +512,110 @@ async def event_starts(conn, slugs, gids) -> dict:
     return out
 
 
+#: the first ordinary (WON / LOST) settlement of each market in the lookback
+LAG_SETTLEMENTS_SQL = (
+    "SELECT DISTINCT ON (us_market_slug) us_market_slug, "
+    "       extract(epoch FROM recorded_at)::float8 AS rec, settled_at "
+    "  FROM paper_settlements "
+    " WHERE settled_at >= to_timestamp($1) AND outcome IN ('WON', 'LOST') "
+    " ORDER BY us_market_slug, settled_at")
+#: the latest mapped game start of each of those markets, in ONE read
+LAG_GAME_STARTS_SQL = (
+    "SELECT DISTINCT ON (market_slug) market_slug, game_start "
+    "  FROM us_premap "
+    " WHERE market_slug = ANY($1::text[]) AND game_start IS NOT NULL "
+    " ORDER BY market_slug, updated_at DESC NULLS LAST")
+#: the warehouse's latest recorded event start of a real (PAPER / ACTUAL)
+#: position on each market the pre-map no longer holds, in ONE read
+LAG_WAREHOUSE_STARTS_SQL = (
+    "SELECT DISTINCT ON (us_market_slug) us_market_slug, event_start_at "
+    "  FROM pos_position_economics "
+    " WHERE us_market_slug = ANY($1::text[]) AND event_start_at IS NOT NULL "
+    "   AND book IN ('PAPER', 'ACTUAL') "
+    " ORDER BY us_market_slug, computed_at DESC, revision DESC")
+#: Xavier's latest entry-thesis event start on each market neither of the
+#: above holds, in ONE read
+LAG_THESIS_STARTS_SQL = (
+    "SELECT DISTINCT ON (us_market_slug) us_market_slug, event_start_at "
+    "  FROM xavier_entry_theses "
+    " WHERE us_market_slug = ANY($1::text[]) AND event_start_at IS NOT NULL "
+    " ORDER BY us_market_slug, recorded_at DESC")
+
+#: the basis of a settlement-lag sample's game start, in the order taken
+LAG_START_PREMAP = "US_PREMAP_GAME_START"
+LAG_START_WAREHOUSE = "POS_POSITION_ECONOMICS_EVENT_START"
+LAG_START_THESIS = "XAVIER_ENTRY_THESIS_EVENT_START"
+LAG_START_FALLBACKS = (
+    ("pos_position_economics", LAG_WAREHOUSE_STARTS_SQL, LAG_START_WAREHOUSE),
+    ("xavier_entry_theses", LAG_THESIS_STARTS_SQL, LAG_START_THESIS))
+
+
+async def settlement_lag_records(conn, *, now,
+                                 days=LOOKBACK_DAYS * 2) -> list:
+    """[{us_market_slug, rec, lag, game_start_basis}] -- the first ordinary
+    settlement of each market against its game start, the start's basis
+    named on every sample.
+
+    ONE PASS PER TABLE (RC6.3). us_premap has no market_slug index
+    (192,554 rows in production on 2026-10-10), and the per-market LATERAL
+    probe this replaced scanned the whole table once per settled market:
+    102 markets took 7.8 s in production, past the 2.0 s bound of the
+    canonical components that read these samples (Allie and the Opportunity
+    Score, canonical_components), so both were UNAVAILABLE on every
+    decision from 2026-10-05 21:38Z. The pre-map game starts are read once
+    for all the settled markets (as lost_opportunity.reads.event_starts
+    does), then each fallback below once for the markets still without one.
+
+    A GAME START THAT SURVIVES THE PRE-MAP PRUNE (RC6.3 review 1). us_premap
+    is a live catalogue: workers/premap.py deletes rows unseen for
+    PRUNE_HOURS (26 h), and a settled market is no longer listed, so a read
+    of us_premap alone saw only the markets settled in about the last day:
+    on 2026-10-10 production had 102 settled markets in the lookback and ONE
+    still in the pre-map (research-sql 38014993180), so the read returned 1
+    sample, below the 5 Allie and the economics need. The start is now
+    taken, per market, from the FIRST of:
+      1. us_premap -- the latest-updated row with a game start (exactly the
+         earlier read wherever the pre-map still holds the market);
+      2. pos_position_economics -- the warehouse's latest recorded event
+         start of a real PAPER / ACTUAL position on the market (written from
+         event_starts above while the pre-map or Xavier's thesis held it);
+      3. xavier_entry_theses -- Xavier's latest entry-thesis event start.
+    A market with none of them gives no sample. The market's earliest
+    WON / LOST settlement in the lookback; MAX_ROWS at most in market
+    order. A fallback table absent from this database is read as absent."""
+    rows = await conn.fetch(LAG_SETTLEMENTS_SQL,
+                            float(now) - days * 86400.0)
+    if not rows:
+        return []
+    slugs = [r["us_market_slug"] for r in rows]
+    starts = {r["market_slug"]: (r["game_start"], LAG_START_PREMAP)
+              for r in await conn.fetch(LAG_GAME_STARTS_SQL, slugs)}
+    for table, sql, basis in LAG_START_FALLBACKS:
+        missing = [s for s in slugs if s not in starts]
+        if not missing or not await has(conn, table):
+            continue
+        for r in await conn.fetch(sql, missing):
+            starts.setdefault(r["us_market_slug"],
+                              (r["event_start_at"], basis))
+    out = []
+    for r in rows:
+        st = starts.get(r["us_market_slug"])
+        if st is None:
+            continue
+        out.append({"us_market_slug": r["us_market_slug"],
+                    "rec": C.num(r["rec"]),
+                    "lag": C.num((r["settled_at"] - st[0]).total_seconds()),
+                    "game_start_basis": st[1]})
+        if len(out) >= MAX_ROWS:
+            break
+    return out
+
+
 async def settlement_lag_samples(conn, *, now, days=LOOKBACK_DAYS * 2) -> list:
-    """[(recorded_at, settled_at - game start)] -- the first ordinary
-    settlement of each market against its pre-map game start."""
-    rows = await conn.fetch(
-        "SELECT extract(epoch FROM s.recorded_at)::float8 AS rec, "
-        "       extract(epoch FROM s.settled_at - g.game_start)::float8 "
-        "       AS lag "
-        "  FROM (SELECT DISTINCT ON (us_market_slug) us_market_slug, "
-        "               recorded_at, settled_at FROM paper_settlements "
-        "         WHERE settled_at >= to_timestamp($1) "
-        "           AND outcome IN ('WON', 'LOST') "
-        "         ORDER BY us_market_slug, settled_at) s "
-        "  JOIN LATERAL (SELECT game_start FROM us_premap "
-        "                 WHERE market_slug = s.us_market_slug "
-        "                   AND game_start IS NOT NULL "
-        "                 ORDER BY updated_at DESC NULLS LAST LIMIT 1) g "
-        "    ON true LIMIT $2", float(now) - days * 86400.0, MAX_ROWS)
-    return [(C.num(r["rec"]), C.num(r["lag"])) for r in rows]
+    """[(recorded_at, settled_at - game start)] -- settlement_lag_records
+    without the market and the basis (the shape every consumer takes)."""
+    return [(r["rec"], r["lag"]) for r in await settlement_lag_records(
+        conn, now=now, days=days)]
 
 
 # ═════════════════════════════════════════════════════════════════════

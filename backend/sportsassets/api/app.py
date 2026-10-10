@@ -611,6 +611,24 @@ async def lifespan(_: FastAPI):
     execmirror_task = asyncio.create_task(_EXM.run(
         _cap_pool, probability_reader=_PX.live_position_evidence,
         management_assessor=_XM.actual_review_hook))
+    # KALSHI SHADOW PLANNER (rc6.3 kalshi-shadow, migration 367): beside the
+    # mirror, the Kalshi leg of each linked PAPER decision planned with
+    # kalshi_orders.plan at 1:1,000 and recorded PLANNED / EXCLUDED in its
+    # own SHADOW table, plus a GET-only account reconciliation when a Kalshi
+    # credential is present. NEVER SUBMITS: it names no submit / cancel / send
+    # primitive, and its account reader has no submit / cancel method and a
+    # transport that refuses everything but GET
+    # (tests/test_kalshi_isolation.py, tests/test_rc63_kalshi_shadow.py);
+    # it stands down while the Kalshi control is enabled, the Kalshi
+    # small-live switch is on or SMALL LIVE is not SHADOW. Kill switch
+    # KALSHI_SHADOW_PLANNER=off. The shared workers cannot host it: they
+    # must never reach kalshi_orders (tests/test_workers_hold_no_venue_write).
+    kshadow_task = None
+    try:
+        from .. import kalshi_shadow as _KSHADOW
+        kshadow_task = asyncio.create_task(_KSHADOW.run(_cap_pool))
+    except Exception:                                           # noqa: BLE001
+        log.warning("kalshi shadow: planner not armed", exc_info=True)
     # Evidence for the post-boot health-check misses: records every thread's
     # stack when the loop is blocked >= 2 s; changes no behaviour.
     from .. import loop_watchdog as _WATCHDOG
@@ -746,7 +764,7 @@ async def lifespan(_: FastAPI):
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
                              archer_task, scout_task, adriana_task, redteam_task, intel_task, pos_task, poslearn_task, twin_task,
-                             improve_task, readiness_task,
+                             improve_task, readiness_task, kshadow_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:

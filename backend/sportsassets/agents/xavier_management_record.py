@@ -67,6 +67,17 @@ PROTECTION_RULE = (
     "flight or a quantity mismatch is not. For EXPOSURE only FILLED "
     "protective quantity counts: a resting sale reduces no exposure until "
     "it fills")
+#: AN OPEN POSITION WHOSE VENUE MARKET IS TERMINAL OR NOT OPEN
+#: (bettor_paper_freshness EXTERNAL_UNAVAILABLE) IS COUNTED BY THE
+#: xavier_complete GATE AND NEVER COMPLETE -- the gate's own named blocker
+#: (capital_readiness.feeds.XAVIER_EXTERNAL_UNAVAILABLE, pinned equal by a
+#: test; not imported, so this read-only record pulls in no readiness code).
+#: The allocation rail's applicable set is unchanged.
+XAVIER_EXTERNAL_UNAVAILABLE = "EXTERNAL_UNAVAILABLE_MARKET_COUNTED_NOT_COMPLETE"
+GATE_POPULATION_RULE = (
+    "every open paper position is counted by the xavier_complete gate; one "
+    "whose venue market is terminal or not open (EXTERNAL_UNAVAILABLE) is "
+    "counted and never complete")
 
 LATEST_REVIEWS_SQL = """
     SELECT x.review_id, x.group_id, x.reviewed_at, x.trigger,
@@ -241,7 +252,10 @@ def build(*, pos: dict, review: dict | None, packet: dict | None,
                               last_fill_at=pos.get("last_fill_at"),
                               protection_state=pstate)
     mclass = (mark or {}).get("class")
-    applicable = mclass != PMF.EXTERNAL_UNAVAILABLE
+    # THE GATE'S POPULATION AND VERDICT (RC6.2 p-xavier M-2): every open
+    # position is counted; an EXTERNAL_UNAVAILABLE one is never complete
+    external = mclass == PMF.EXTERNAL_UNAVAILABLE
+    complete = bool(cur["current"]) and not external
 
     # ── orders, protection and exposure, as they stand NOW ─────────────
     mine = [o for o in orders or []
@@ -283,6 +297,8 @@ def build(*, pos: dict, review: dict | None, packet: dict | None,
         add(code)
     if not cur["current"]:
         add(cur["why"])
+    if external:
+        add(XAVIER_EXTERNAL_UNAVAILABLE)
     if m.get("feed_refusal"):
         add("PINNAPI_HELD_READ:%s" % m["feed_refusal"])
     if pstate != PMF.PS_PROTECTED:
@@ -386,9 +402,12 @@ def build(*, pos: dict, review: dict | None, packet: dict | None,
             "complete_now": bool(cur["current"]),
             "why_not_complete_now": cur["why"],
             "mark_class_now": mclass,
-            "counted_by_the_gate": applicable,
-            "rule": PMF.PACKET_CURRENCY_RULE},
-        "complete_current_packet": bool(cur["current"]),
+            "counted_by_the_gate": True,
+            "counted_not_complete_because": (XAVIER_EXTERNAL_UNAVAILABLE
+                                             if external else None),
+            "rule": PMF.PACKET_CURRENCY_RULE,
+            "gate_population_rule": GATE_POPULATION_RULE},
+        "complete_current_packet": complete,
         "blockers": blockers}
 
 
@@ -474,8 +493,10 @@ def summary(records: list) -> dict:
     unread = [r for r in recs if r.get("unread")]
     good = [r for r in recs if not r.get("unread")]
     complete = [r for r in good if r.get("complete_current_packet")]
-    counted = [r for r in good if (r.get("packet") or {}).get(
-        "counted_by_the_gate")]
+    # the gate counts every open position: an unread record is counted (and
+    # incomplete) too -- the gate reads the positions itself
+    counted = [r for r in recs if r.get("unread") or (
+        r.get("packet") or {}).get("counted_by_the_gate")]
     incomplete = [r for r in good if not r.get("complete_current_packet")]
     by_blocker: dict = {}
     for r in incomplete:
@@ -497,10 +518,15 @@ def summary(records: list) -> dict:
             "group_id": (r.get("position") or {}).get("group_id"),
             "blockers": r.get("blockers")}
             for r in incomplete][:SUMMARY_LISTED],
+        "external_unavailable_counted_not_complete": sum(
+            1 for r in good if (r.get("packet") or {}).get(
+                "counted_not_complete_because")
+            == XAVIER_EXTERNAL_UNAVAILABLE),
         "rule": ("complete_current_packet is bettor_paper_freshness."
                  "packet_currency with the live protection -- the rule the "
-                 "capital-readiness gate xavier_complete applies; an "
-                 "unread record is counted as incomplete, never complete")}
+                 "capital-readiness gate xavier_complete applies; "
+                 + GATE_POPULATION_RULE + "; an unread record is counted "
+                 "as incomplete, never complete")}
 
 
 def describe() -> dict:

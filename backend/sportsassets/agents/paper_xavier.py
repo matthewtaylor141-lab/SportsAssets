@@ -1590,9 +1590,14 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
     handed = {r["group_id"]: L._epoch(r["first_fill_at"]) for r in
               await conn.fetch("SELECT group_id, first_fill_at FROM "
                                " paper_handoffs WHERE account_id=$1", acct)}
+    # `reviewed_groups`: the groups whose review this step actually wrote
+    # (a review record exists) -- a deferred group, a group whose review
+    # raised and a group that was not due are never in it. The held-change
+    # scheduler reads it to tell a reviewed change from a missed one.
     out = {"reviews": 0, "groups_held": len(groups), "by_trigger": {},
            "not_handed_off": sorted(set(groups) - set(handed)),
-           "due": 0, "deferred": [], "first_review_latency_s": []}
+           "due": 0, "deferred": [], "first_review_latency_s": [],
+           "reviewed_groups": []}
     ev = await _requeue_evidence(conn, ctx, [g for g in groups
                                              if g in handed], at=at)
     # EXIT INTENTS: one whose position closed is resolved; the rest give
@@ -1683,6 +1688,8 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
                  "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])})
             continue
         out["reviews"] += len(got["reviews"])
+        if got["reviews"]:
+            out["reviewed_groups"].append(g)
         out["by_trigger"][trig] = out["by_trigger"].get(trig, 0) + 1
         if trig == T_FIRST and d_at is not None:
             out["first_review_latency_s"].append(round(at - d_at, 3))

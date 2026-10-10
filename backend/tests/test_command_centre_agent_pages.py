@@ -1540,6 +1540,10 @@ XAVIER_PAYLOAD = dict(_base(), positions=_ok(BAL_UNMARKED["open_positions"]),
                       last_updated_at=T0 + 4)
 AUDREY_PAYLOAD = dict(_base(), daily_reports={"status": "EMPTY", "why": "NO_PAPER_DAILY_REPORT_YET", "data": []},
                       audit_entries={"status": "EMPTY", "why": "NO_PAPER_AUDIT_FINDING", "data": []},
+                      # (rc6.3) a count beside the sections, not a section; the page does not read it
+                      days_not_reconciled={"kind": "AUDREY_DAY_NOT_RECONCILED", "count": 0, "days": [],
+                                           "basis": "one paper_audrey_findings row per session and day",
+                                           "why": None},
                       last_updated_at=T0 + 4)
 ENABLED = {"env_flag": "PAPER_SESSION", "env_on": True, "control_on": True, "control_why": "owner",
            "control_updated_by": "owner", "enabled": True, "refusal": None}

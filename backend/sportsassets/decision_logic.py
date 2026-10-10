@@ -148,6 +148,12 @@ DECISION_LOGIC_FILES = (
     # to every ENTRY (no growth where management is stale) -- both change
     # which actions and entries happen, so a change restarts the window
     "xavier_packet.py", "bettor_paper_freshness.py",
+    # (RC6.2 SW-1b) the one protectability check every paper entry runs
+    # (paper_explore.xavier_can_protect_fills -> paper_xavier.
+    # protective_price): paper_benchmark's and paper_derek's ENTER refuse
+    # XAVIER_CANNOT_PROTECT through it, so it changes which entries happen
+    # and a change restarts the window
+    "agents/paper_explore.py",
     # the agent components inside the intent
     "agents/archer.py", "lost_opportunity/score.py",
     "lost_opportunity/reads.py", "profitability/economics.py",
@@ -165,6 +171,12 @@ DECISION_LOGIC_FILES = (
     # lost_opportunity/score.py do -- pinned, so a change restarts the
     # forward window rather than slipping under it
     "execution_evidence.py", "settlement_exception_risk.py",
+    # (RC6.3 allie-exposure) the canonical open-quantity rule and the open
+    # exposure statements Allie's book / fixture inputs execute
+    # (canonical_components.allie_at_decision): they set the exposure the
+    # intent's allie component records, so a change restarts the forward
+    # window rather than slipping under it
+    "open_position_canon.py",
     "opportunity_score_v2.py")
 
 #: THE ROOTS whose package imports the test derives the list from: the
