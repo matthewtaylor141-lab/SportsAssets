@@ -58,7 +58,7 @@ async def _held_freshness(pool) -> dict:
         async with pool.acquire() as c:
             async with c.transaction(readonly=True):
                 await c.execute("SET LOCAL statement_timeout = 15000")
-                got = await PMF.read(c, L.ACCOUNT_ID, rows_limit=0)
+                got = await PMF.read(c, await L.selected_account(c), rows_limit=0)
         return {"open_positions": got.get("open_positions"),
                 "markable": got.get("markable"),
                 "freshly_manageable": got.get("freshly_manageable"),

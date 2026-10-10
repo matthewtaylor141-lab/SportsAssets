@@ -172,7 +172,9 @@ async def test_the_rooms_and_the_room_on_a_real_database(monkeypatch):
         async def pool():
             return _Pool(conn)
         monkeypatch.setattr(CP, "_pool", pool)
-        monkeypatch.setattr(PR, "PAPER_ACCOUNT_ID", s["a"]["account_id"])
+        from unittest.mock import AsyncMock
+        from sportsassets import simulated_account_context as AC
+        monkeypatch.setattr(AC, "selected_account", AsyncMock(return_value=s["a"]["account_id"]))
         key = "PAPER:EVT:" + s["event"]
 
         lst = await CP.position_rooms(Response(), book="paper")

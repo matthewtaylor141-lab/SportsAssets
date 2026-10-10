@@ -209,12 +209,14 @@ def ledger_reconciliation(claimed: list, positions: list, *,
             "basis": "PAPER ledger positions (bettor_paper_ledger.positions)"}
 
 
-async def read(conn, *, now: float, account_id: str = "paper_acct_main",
+async def read(conn, *, now: float, account_id: str | None = None,
                attributed=None, fixtures=None, read=None) -> dict:
     """`attributed` / `fixtures` / `read`: controls.attributed_positions'
     rows (EVERY PAPER position) and its read figures. A read that left out
     a position of the forward cohort is no scoreboard: UNAVAILABLE by name
     (ATTRIBUTION_READ_TRUNCATED), never one over a subset."""
+    from ..simulated_account_context import selected_account
+    account_id = account_id or await selected_account(conn)
     th = thresholds()
     since = cohort_start(th)
     if attributed is None:

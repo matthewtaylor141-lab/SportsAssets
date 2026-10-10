@@ -50,7 +50,7 @@ async def _read_only(fn):
 @router.get(PATH, dependencies=[Depends(require_read)])
 async def profitability_os(
         response: Response = None,
-        account_id: str = Query(default="paper_acct_main", min_length=1,
+        account_id: str | None = Query(default=None, min_length=1,
                                 max_length=120),
         window_days: float = Query(default=30.0, ge=1.0, le=90.0)) -> dict:
     from ..pos_os import assemble as A
@@ -62,9 +62,11 @@ async def profitability_os(
         response.headers["Cache-Control"] = "no-store"
     now = time.time()
     try:
-        inputs = await _read_only(lambda conn: R.load_all(
-            conn, account_id=account_id, now=now,
-            window_days=float(window_days)))
+        async def load(conn):
+            from ..simulated_account_context import selected_account
+            acct = account_id or await selected_account(conn)
+            return await R.load_all(conn, account_id=acct, now=now, window_days=float(window_days))
+        inputs = await _read_only(load)
     except Exception as exc:                                    # noqa: BLE001
         return PC.envelope(C.UNAVAILABLE, "%s:%s" % (
             type(exc).__name__, str(exc)[:160]), computed_at=now, data=None,

@@ -189,7 +189,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     if cross["held"]:
         refusals.append(PB.R_CROSS_STRATEGY)
     from .. import bettor_paper_limits as LIMITS
-    if not refusals and not LIMITS.uses_owner_policy(ctx["account_id"]) and await conn.fetchval(
+    if not refusals and not await LIMITS.uses_account_policy(conn, ctx["account_id"]) and await conn.fetchval(
             "SELECT EXISTS (SELECT 1 FROM paper_orders WHERE account_id=$1 "
             "   AND strategy=$2 AND role='ENTRY' AND state = ANY($3::text[]) "
             "   AND (us_market_slug=$4 OR ($5::text IS NOT NULL AND "

@@ -410,7 +410,7 @@ def default_steps() -> list:
 # ═════════════════════════════════════════════════════════════════════
 
 async def paper_pass(conn, *, now: float | None = None,
-                     account_id: str = L.ACCOUNT_ID, market_data=None,
+                     account_id: str | None = None, market_data=None,
                      steps: list | None = None, config: dict | None = None,
                      force: bool = False, fee_fn=None,
                      trigger: str = "SCHEDULED_SERVICING",
@@ -450,7 +450,7 @@ async def paper_pass(conn, *, now: float | None = None,
             return dict(out, refusal=R_BUSY, why="ADVISORY_LOCK_HELD")
         try:
             return await _run(conn, out, at=at, t0=t0,
-                              account_id=account_id, market_data=market_data,
+                              account_id=account_id or await L.selected_account(conn), market_data=market_data,
                               steps=steps, config=config, fee_fn=fee_fn,
                               cycle=cycle, live_clock=live_clock,
                               sleep=sleep)
@@ -1202,7 +1202,7 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
     `schedule_fill` without it."""
     if not S.env_on():
         return {"decided": False, "why": S.R_ENV_OFF}
-    acct = account_id or DEFAULT_ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     live_clock = now is None
     at = float(now if now is not None else time.time())
     try:
@@ -1218,6 +1218,9 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
         from .. import bettor_external_shadow as ext
         if row is None or row["experiment_id"] != ext.EXPERIMENT_ID:
             return {"decided": False, "why": "NOT_AN_ENTRY_EXPERIMENT_ROW"}
+        epoch_opened = sess['config'].get('epoch_opened_at')
+        if epoch_opened is not None and (row['received_at'] is None or L._epoch(row['received_at']) < epoch_opened):
+            return {'decided': False, 'why': 'PAPER_VALUATION_PREDATES_EPOCH'}
         md = market_data if market_data is not None else _client()
         before = int(getattr(md, "mutation_attempts", 0) or 0)
         cfg = sess.get("effective_config") or sess["config"]
@@ -1419,7 +1422,7 @@ async def held_review(conn, *, slugs, now: float | None = None,
                       account_id: str | None = None, fee_fn=None) -> dict:
     """XAVIER'S STEP FOR THE GROUPS HOLDING `slugs`, now. Never raises."""
     from . import paper_xavier as PX
-    acct = account_id or DEFAULT_ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     live_clock = now is None
     at = float(now if now is not None else time.time())
     out: dict[str, Any] = {"at": at, "slugs": sorted(slugs or []),

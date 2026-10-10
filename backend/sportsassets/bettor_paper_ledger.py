@@ -224,9 +224,18 @@ async def ensure_account(conn, *, account_id: str = ACCOUNT_ID,
 
 async def _lock(conn, account_id: str):
     """THE ACCOUNT ROW LOCK. Caller holds a transaction."""
+    # Match activation's lock ordering: selector before account. This avoids
+    # a writer holding account while waiting on a selector held by activation.
+    if await conn.fetchval("SELECT to_regclass('paper_epoch_control') IS NOT NULL"):
+        await conn.fetchval('SELECT account_id FROM paper_epoch_control WHERE singleton FOR SHARE')
     return await conn.fetchrow(
         "SELECT * FROM paper_accounts WHERE account_id = $1 FOR UPDATE",
         account_id)
+
+
+async def selected_account(conn):
+    from .simulated_account_context import selected_account as resolve
+    return await resolve(conn)
 
 
 async def cash_state(conn, account_id: str) -> dict:
@@ -417,7 +426,7 @@ async def fixture_owner_refusal(conn, o: dict, *,
     With `same_strategy_live`, also refuses when THIS strategy already has a
     live (working) entry on it. Returns a refusal dict or None."""
     from . import bettor_paper_limits as LIMITS
-    if LIMITS.uses_owner_policy(o["account_id"]):
+    if await LIMITS.uses_account_policy(conn, o["account_id"]):
         return None
     acct, strat = o["account_id"], o.get("strategy")
     slug, fixture = o.get("us_market_slug"), o.get("fixture")
@@ -602,7 +611,7 @@ async def _submit_order(conn, order: dict, *, caps: dict | None = None,
             if chk:
                 return dict(chk, ok=False, reservation_usd=f(reserve),
                             available_usd=f(cs["available"]))
-            if o.get("role") == "ENTRY" and _LIMITS.uses_owner_policy(acct):
+            if o.get("role") == "ENTRY" and await _LIMITS.uses_account_policy(conn, acct):
                 held = await same_contract_held(
                     conn, acct, o.get("strategy"), o.get("us_market_slug"),
                     o.get("holding_side"))
@@ -1050,6 +1059,24 @@ async def positions(conn, account_id: str, *,
             for r in await conn.fetch(POSITIONS_SQL, account_id)]
     return rows if include_closed else [p for p in rows
                                         if is_open(p["open_qty"])]
+
+
+async def lineage_positions(conn, account_id: str, *, supplied=None) -> list:
+    """Risk/learning population across immutable epochs; balances stay local.
+
+    A caller's own-account snapshot is retained. Ancestor reads are mandatory
+    even when the caller supplies an empty snapshot. Marked inherited rows
+    make nested authority calls idempotent without collapsing account keys.
+    """
+    from .simulated_account_context import risk_history_accounts
+    lineage = await risk_history_accounts(conn, account_id)
+    out = []
+    for aid in lineage:
+        cached = None if supplied is None else [p for p in supplied
+            if p.get('_history_account_id', account_id) == aid]
+        rows = cached if cached is not None and (aid == account_id or cached) else await positions(conn, aid, include_closed=True)
+        out.extend(dict(p, _history_account_id=aid) for p in rows)
+    return out
 
 
 async def held_uncommitted(conn, account_id: str, *, group_id: str,

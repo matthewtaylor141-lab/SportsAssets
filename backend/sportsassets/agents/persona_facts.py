@@ -981,7 +981,7 @@ async def _agent_memory(conn, f: "Facts", agent: str | None, *,
             return out
         from . import learning_context as LC
         from .. import bettor_paper_ledger as L
-        selection = await LC.retrieve(conn, account_id=L.ACCOUNT_ID,
+        selection = await LC.retrieve(conn, account_id=await L.selected_account(conn),
                                       agent=agent, question=question,
                                       now=time.time() if now is None else now)
         rows = selection.pop("lessons")

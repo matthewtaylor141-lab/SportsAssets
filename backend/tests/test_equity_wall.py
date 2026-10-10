@@ -409,7 +409,9 @@ async def test_the_live_endpoint_over_real_records(monkeypatch):
         async def pool():
             return _Pool(conn)
         monkeypatch.setattr(E, "_pool", pool)
-        monkeypatch.setattr(L, "ACCOUNT_ID", acct)
+        async def selected_account(conn):
+            return acct
+        monkeypatch.setattr(L, "selected_account", selected_account)
         E._LIVE.update(at=0.0, payload=None)
         E._CURVES.clear()
 

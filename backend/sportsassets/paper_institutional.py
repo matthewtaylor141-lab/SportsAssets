@@ -1836,7 +1836,7 @@ async def reconciliation_report(conn, *, account_id: str | None = None,
     the position/fill/settlement/reservation cross-checks. Every
     discrepancy is listed; RECONCILED only when every check passes."""
     L = _L()
-    acct = account_id or L.ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     at = float(now if now is not None else time.time())
     out = base(at, acct)
     if not await has_schema(conn):
@@ -2032,7 +2032,7 @@ async def export_csv(conn, name: str, *, account_id: str | None = None,
     RuntimeError when the data cannot be read (the route answers 503: an
     export never ships an empty file in place of unavailable data)."""
     L = _L()
-    acct = account_id or L.ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     at = float(now if now is not None else time.time())
     if name not in EXPORTS:
         raise ValueError(name)

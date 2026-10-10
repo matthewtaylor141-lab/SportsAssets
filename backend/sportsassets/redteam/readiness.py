@@ -25,6 +25,7 @@ from . import venue_health as VH
 
 VERSION = "RED_TEAM_READINESS_V1"
 ACCOUNT_ID = "paper_acct_main"
+from ..simulated_account_context import selected_account as _selected_account
 CAPACITY_WINDOW_DAYS = 14
 QTY_GRID = ((1, 10), (11, 50), (51, 100), (101, 500), (501, 10 ** 9))
 METRIC_MAX_AGE_S = 900.0
@@ -505,8 +506,9 @@ async def evaluate(conn, *, now: float | None = None,
          if certs.get("INVALIDATED") else [])
         + ([] if certs.get("CERTIFIED") else ["NO_CERTIFIED_ALIAS"]),
         {"latest_by_status": certs})
+    selected_paper_account = await _selected_account(conn)
     ex = await sec.run("canonical_exposure", lambda: X.census(
-        conn, ACCOUNT_ID, sha=sha, at=now), {
+        conn, selected_paper_account, sha=sha, at=now), {
             "eligible": False, "blockers": ["READ_UNAVAILABLE"],
             "receipts": []})
     controls["CANONICAL_EXPOSURE"] = C.result(

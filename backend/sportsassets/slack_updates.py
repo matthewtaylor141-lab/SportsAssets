@@ -37,7 +37,6 @@ from datetime import datetime, timezone
 
 from . import order_state_truth as OST
 
-ACCOUNT = "paper_acct_main"
 #: the most decision rows one update reads to rank the leading refusals
 RANKED_DECISIONS_MAX = 20000
 STATE_KEY = "agent.slack.updates"
@@ -104,19 +103,21 @@ async def last_completed_pass_at(conn, attempt: dict) -> float | None:
 async def snapshot(conn, now: float) -> dict:
     """One read of everything an update reports, from the same functions the
     pages use (account_section, pnl_by_strategy, paper_brief.reconcile)."""
+    from .simulated_account_context import selected_account
+    account_id = await selected_account(conn)
     from . import bettor_paper_ops as OPS
     from .agents import paper_brief as PB
-    a = await OPS.audrey_operations(conn, account_id=ACCOUNT, now=now)
+    a = await OPS.audrey_operations(conn, account_id=account_id, now=now)
     acct = (a.get("account") or {}).get("data") or {}
     pnl = (a.get("pnl_by_strategy") or {}).get("data") or []
     try:
-        rc = await PB.reconcile(conn, now=now, account_id=ACCOUNT, entries=0)
+        rc = await PB.reconcile(conn, now=now, account_id=account_id, entries=0)
     except Exception as exc:                                    # noqa: BLE001
         rc = {"reconciled": None, "error": type(exc).__name__}
     research = [dict(r) for r in await conn.fetch(
         "SELECT status, count(*) AS n, max(updated_at) AS latest "
         "  FROM agent_tasks WHERE kind=$2 "
-        "   AND spec->>'account_id'=$1 GROUP BY 1", ACCOUNT, _kind())] \
+        "   AND spec->>'account_id'=$1 GROUP BY 1", account_id, _kind())] \
         if await conn.fetchval("SELECT to_regclass('agent_tasks') IS NOT NULL") \
         else []
     cyc = await _row(conn, "ext_pinnacle_last_cycle")
@@ -299,11 +300,13 @@ def mirror_block(m: dict | None) -> str:
 
 
 async def activity(conn, since: float, now: float) -> dict:
-    """What happened in the paper experiment since the last update."""
+    """What happened in the selected paper account since the last update."""
+    from .simulated_account_context import selected_account
+    account_id = await selected_account(conn)
     r = await conn.fetchrow(
         """SELECT count(*) AS decisions,
                   count(*) FILTER (WHERE verdict <> 'REFUSE') AS approved
-             FROM paper_decisions WHERE decided_at > to_timestamp($1)""", since)
+             FROM paper_decisions WHERE account_id=$2 AND decided_at > to_timestamp($1)""", since, account_id)
     # THE LEADING REFUSALS, BY UNIQUE OPPORTUNITY (R30A, owner audit
     # 2026-10-04). This used to be `count(*) GROUP BY refusal` over every
     # strategy's decision rows -- TRAINING and BENCHMARK included -- so the
@@ -327,7 +330,7 @@ async def activity(conn, since: float, now: float) -> dict:
             WHERE account_id = $4 AND decided_at > to_timestamp($1)
               AND strategy = ANY($2::text[])
             ORDER BY decided_at DESC LIMIT $3""", since, inv,
-        RANKED_DECISIONS_MAX, ACCOUNT)]
+        RANKED_DECISIONS_MAX, account_id)]
     ranked = [e for e in FN.blocker_ranking(drows, sleeve=PC.INVESTMENT,
                                             top=10)
               if e["unique_opportunities"]][:3]
@@ -341,10 +344,10 @@ async def activity(conn, since: float, now: float) -> dict:
                                      AND state = ANY($3::text[])) AS entries_resting,
                   count(*) FILTER (WHERE role<>'ENTRY') AS other
              FROM paper_orders WHERE account_id=$1 AND decided_at > to_timestamp($2)""",
-        ACCOUNT, since, OST.raw_states(OST.SRC_PAPER, OST.LIVE_STATES))
+        account_id, since, OST.raw_states(OST.SRC_PAPER, OST.LIVE_STATES))
     last_entry = await conn.fetchval(
         "SELECT extract(epoch FROM max(decided_at)) FROM paper_orders "
-        " WHERE account_id=$1 AND role='ENTRY'", ACCOUNT)
+        " WHERE account_id=$1 AND role='ENTRY'", account_id)
     unanswered = await conn.fetch(
         """SELECT delivery_id, agent, state, created_at FROM agent_slack_delivery
             WHERE question IS NOT NULL AND state NOT IN ('SENT')

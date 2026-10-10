@@ -825,7 +825,9 @@ async def test_the_endpoint_over_a_seeded_multi_sleeve_book(monkeypatch):
             "INSERT INTO intel_attribution (book, subject_id, group_id, "
             " run_id, computed_at, slippage_usd, slippage_pc) VALUES "
             " ('PAPER',$1,$2,'r',now(),0.75,0.0075)", "val-" + g1, g1)
-        monkeypatch.setattr(L, "ACCOUNT_ID", acct)
+        async def selected_account(conn):
+            return acct
+        monkeypatch.setattr(L, "selected_account", selected_account)
         # THE PRODUCTION CUTOVER (recorded per release in production by
         # live_parity.record_cutover; the forward window starts at the
         # EFFECTIVE one -- R30A); here, inside the rolled-back test

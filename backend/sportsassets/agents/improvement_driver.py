@@ -471,7 +471,7 @@ async def step(conn, ctx: dict) -> dict:
     from .. import bettor_paper_ledger as L
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))
     at = float(clock())
-    if ctx.get("account_id") != L.ACCOUNT_ID:
+    if ctx.get("account_id") != await L.selected_account(conn):
         return {"ran": False, "why": "NOT_THE_MAIN_PAPER_ACCOUNT"}
     try:
         last = L._j(await conn.fetchval(

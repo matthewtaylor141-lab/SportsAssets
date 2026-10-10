@@ -206,10 +206,11 @@ BACKSTOP_SQL = """
 """
 
 
-async def classify_missing(conn, account_id: str = L.ACCOUNT_ID) -> int:
+async def classify_missing(conn, account_id: str = None) -> int:
     """THE BACKSTOP: record the deterministic classification of any group
     the entry trigger did not (append-only; idempotent). Returns the number
     of rows written."""
+    account_id = account_id or await L.selected_account(conn)
     if not await schema(conn):
         return 0
     got = await conn.execute(BACKSTOP_SQL, account_id, CLASSIFIER_VERSION)
@@ -457,12 +458,13 @@ def split(bal: dict, all_positions: list, classes: dict, *, now: float,
     }
 
 
-async def sleeve_book(conn, account_id: str = L.ACCOUNT_ID, *,
+async def sleeve_book(conn, account_id: str = None, *,
                       now: float | None = None, bal: dict | None = None
                       ) -> dict:
     """The read: balances (or the caller's), every position, the durable
     classifications and the genuine mark changes -> split(). Plain
     SELECTs only."""
+    account_id = account_id or await L.selected_account(conn)
     now = float(time.time() if now is None else now)
     if not await schema(conn):
         return {"status": "UNAVAILABLE", "why": R_NO_SCHEMA}

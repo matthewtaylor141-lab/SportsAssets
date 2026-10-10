@@ -765,7 +765,10 @@ async def test_the_funnel_over_decisions_the_real_writer_recorded(
         # INVESTMENT sleeve, unique opportunities, rows beside it
         from sportsassets import slack_updates as U
         from sportsassets.agents import paper_ops_audit as POA
-        monkeypatch.setattr(U, "ACCOUNT", acct["account_id"])
+        from unittest.mock import AsyncMock
+        from sportsassets import simulated_account_context as AC
+        monkeypatch.setattr(AC, "selected_account",
+                            AsyncMock(return_value=acct["account_id"]))
         act = await U.activity(conn, now - 3600.0, now + 60.0)
         assert act["refusals"][0] == (d_why, 6)
         top3 = {r for r, _n in act["refusals"]}

@@ -276,18 +276,19 @@ async def production_cutover_logic_hash(conn) -> str | None:
         "SELECT decision_logic_hash FROM live_parity_effective_cutover")
 
 
-async def _read(conn, *, since, since_source: str, now: float) -> dict:
+async def _read(conn, *, since, since_source: str, now: float, account_id: str | None = None) -> dict:
     import asyncio
 
     from .. import bettor_paper_ledger as L
     from ..profitability import validation as V
+    account_id = account_id or await L.selected_account(conn)
     nested = conn.is_in_transaction()
     tr = conn.transaction(readonly=not nested)
     await tr.start()
     try:
         await conn.execute("SET LOCAL statement_timeout = %d"
                            % STATEMENT_TIMEOUT_MS)
-        data, sources = await gather(conn, L.ACCOUNT_ID, now=now)
+        data, sources = await gather(conn, account_id, now=now)
         cutover = await production_cutover_epoch(conn)
         cutover_hash = await production_cutover_logic_hash(conn)
     finally:
@@ -307,19 +308,22 @@ async def _read(conn, *, since, since_source: str, now: float) -> dict:
 @router.get(PATH, dependencies=[Depends(require_read)])
 async def profitability_validation(
         since: float | None = Query(default=None, ge=0)) -> dict:
+    from .. import bettor_paper_ledger as L
     from ..profitability import common as C
     from ..profitability import validation as V
     now = time.time()
     src = "QUERY" if since is not None else "PRODUCTION_CUTOVER"
-    key = (None if since is None else round(float(since), 3), src)
-    hit = _CACHE.get(key)
-    if hit and now - hit[0] < CACHE_S:
-        return hit[1]
     try:
         pool = await _pool()
         async with pool.acquire() as conn:
+            account_id = await L.selected_account(conn)
+            key = (account_id, None if since is None else round(float(since), 3), src)
+            hit = _CACHE.get(key)
+            if hit and now - hit[0] < CACHE_S:
+                return hit[1]
             got = await _read(conn, since=None if since is None
-                              else float(since), since_source=src, now=now)
+                              else float(since), since_source=src, now=now,
+                              account_id=account_id)
     except Exception as exc:                                    # noqa: BLE001
         return C.envelope("UNAVAILABLE", "%s: %s" % (type(exc).__name__,
                                                      str(exc)[:160]),
@@ -328,5 +332,10 @@ async def profitability_validation(
                      data=got.get("data"), since=since,
                      summed_across_books=False,
                      summed_across_sleeves=False)
+    for cached_key in list(_CACHE):
+        if cached_key[0] != account_id or now - _CACHE[cached_key][0] >= CACHE_S:
+            del _CACHE[cached_key]
+    if len(_CACHE) >= 64:
+        _CACHE.clear()
     _CACHE[key] = (now, out)
     return out
