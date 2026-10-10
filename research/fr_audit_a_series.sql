@@ -5,7 +5,7 @@
 --   A  which build runs on the plane now and which freshness task exists
 --   B  the plane events by kind in the last 36 h (is the window measure written)
 --   C  the priority rate per hour since the plane booted (2026-10-09 16:00Z)
---   D  the newest snapshot: counts, sources, read pass, census totals
+--   D  the newest snapshots: counts, sources, read pass, census totals
 \echo === A. plane boot records and heartbeats now ===
 SELECT service, status,
        round(extract(epoch FROM now() - beat_at)::numeric, 1) AS age_s,
