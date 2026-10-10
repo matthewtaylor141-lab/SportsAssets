@@ -24,11 +24,18 @@ model ID and fit timestamp; refits use historical observations and an empty refi
 cannot replace a measured inherited model. Accounting remains account-local.
 
 Read-only inspection: `python -m sportsassets.tools.paper_day_one read`.
-The authenticated `GET /api/command/paper/day-one` reports the selected account;
-`GET /api/command/paper/archive/{account_id}` exposes historical balances and
-the latest 100 ledger entries. Full historical ledger queries remain available.
-The primary account endpoint attaches the epoch receipt only for a registered
-account. A Day One label is absent before actual activation.
+The authenticated `GET /api/command/paper/day-one` reports the selected account
+and lists every registered epoch (`registered_epochs`: selected or rolled back,
+with links to its archive and Audrey reports), so a rolled-back epoch stays
+reachable after `day_one` turns false. `GET /api/command/paper/archive/{account_id}`
+exposes an account's balances and its ledger newest first, a page at a time
+(`limit` up to 500, `before_seq` with the returned `page.next_before_seq` pages
+back to the first entry); the selected account is labelled as the current book,
+never HISTORICAL. `GET /api/command/paper/audrey?account_id=` reads Audrey's
+reports of any account of the selected account's epoch family (an account
+outside it is refused by name). The primary account endpoint attaches the epoch
+receipt only for a registered account. A Day One label is absent before actual
+activation.
 
 ## Conditional operator activation
 
@@ -78,13 +85,48 @@ day gets a version covering everything recorded up to the switch (a switch
 whose outgoing report cannot be written is refused,
 `PAPER_EPOCH_OUTGOING_AUDREY_REPORT_FAILED`). Audrey's day close on the
 selected account also writes the one final version of every other family
-account's reported day once that day is over; nothing else is written for an
-archived account, and accounts outside the family are never touched.
+account's reported day once that day is over, and accounts outside the family
+are never touched. Because Xavier's settlement pass keeps applying settlement
+revisions to every family account, an archived or rolled-back account can
+record a correction after its last reported day closed. THE RULE: whenever a
+family account's last activity (its latest fill, settlement version or ledger
+entry) is later than its newest Audrey report, the selected account's step
+writes that account's current-day version carrying it, and the family day close
+writes that day's one final version once it is over -- so every realized gain
+or loss on an archived account's ledger appears in an Audrey report. A family
+account that records nothing new gets no further version. A switch whose
+outgoing version is not stored (a closing write or the version taken by a
+writer outside the per-day lock) is refused by name
+(`PAPER_SWITCH_AUDREY_VERSION_NOT_STORED` inside
+`PAPER_EPOCH_OUTGOING_AUDREY_REPORT_FAILED`); a switch whose outgoing account
+already reported a later day (a pass clock ahead of the database's) writes its
+version on that newest day instead of being silently skipped.
 The agents' research queue (task specs, flow IDs, source-context checks,
 claims, its control row and heartbeat), its Slack review posts and its loop
 health source, the scheduled profitability research cycle, Audrey's
 revenue-reliability proposals, the live-game display's held fixtures and the
-opportunity funnel's decision read also resolve the selected account. A newly selected epoch's research control row
+opportunity funnel's decision read also resolve the selected account. So do
+Command's institutional reports (summary, P&L, performance, positions, blotter,
+attribution, risk, reconciliation and the CSV exports), the correlation graph,
+the PAPER loss attribution (which names the account), the profitability
+validation and profitability scoreboard (which name the account they read).
+`intel.attribution.load_paper` has no default account: an omitted account fails
+loudly. The red-team risk and learning controls (ATTRIBUTION, PROFIT_BREAKERS,
+MULTIPLE_TESTING and the registered study) read the selected account's epoch
+family at original timestamps, so an activation neither resets their populations
+nor hides Day One's positions from them; before any epoch that family is
+`paper_acct_main` alone. The forward scoreboard reconciles its attributed claims
+against the ledger of exactly those accounts. Constants that still name
+`paper_acct_main` are its own identity (session naming, the owner capital policy
+of `bettor_paper_limits`, which epochs inherit through their frozen source
+config), defaults of functions every production caller passes an account
+(`intel` calibration / risk / regime / sizing / allocator, `profitability.reads`,
+`revenue_reliability.evidence.build`), or the SMALL LIVE mirror below.
+The archived account's open research tasks (agent tasks whose spec names it)
+are left open and are not claimed again after the switch: they drop out of the
+research queue, Slack and loop health with no cancel or carry-over record. They
+are research only (no order, no ledger entry); closing or carrying them over is
+not automated. A newly selected epoch's research control row
 starts from its nearest ancestor's (the manager's on/off and hourly budget
 carry across the switch). The actual-execution mirror (SMALL LIVE, SHADOW)
 deliberately stays on `paper_acct_main`: after activation it mirrors no new
@@ -150,7 +192,20 @@ upward transition. Every strategy-lifecycle write takes the selector row FOR
 SHARE, so a rollback waits for a tightening already in flight and then refuses,
 and a tightening that waited for a switch is refused by name
 (`PAPER_EPOCH_ACCOUNT_IS_NOT_SELECTED`) instead of landing on the archived
-account; tightening the selected account is never refused. Losses from rolled-back accounts remain in subsequent risk
+account; tightening the selected account is never refused. One write on a
+non-selected account is accepted: a tightening of a registered ANCESTOR of the
+selected account (the account a rollback restores), strictly tighter than that
+ancestor's current state read under the same lock. It only makes the restore
+target stricter (the selected account inherits it wherever it has no event of
+its own), so nothing is released. ROLLBACK PREPARATION: an automatic
+REDUCED_SIZE, SHADOW_ONLY or QUARANTINED on the epoch -- typically while it is
+losing, exactly when a rollback is wanted -- makes the rollback refuse
+`ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION`; a named person then tightens the
+same strategy on the previous account (`paper_acct_main` for the first epoch) to
+at least the epoch's state, and the rollback goes through with the restriction
+kept on the restored account. A loosening of a non-selected account, and any
+write on a deselected descendant (a rolled-back epoch), stay refused by name.
+Losses from rolled-back accounts remain in subsequent risk
 and learning populations without moving cash or changing accounting receipts.
 
 DDL rollback 317 is permitted only before any epoch/evidence exists and only
