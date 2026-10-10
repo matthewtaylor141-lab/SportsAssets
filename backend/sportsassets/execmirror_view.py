@@ -32,6 +32,18 @@ def _f(v, nd=6):
     return None if v is None else round(float(v), nd)
 
 
+def _live_qty(r):
+    """A row's live quantity as the view shows it (rc6.3 pmus-sizing,
+    migration 368): live_qty_exact when the row carries one (a fractional
+    order: 2.41), else the integer live_qty exactly as before."""
+    ex = r.get("live_qty_exact")
+    return r.get("live_qty") if ex is None else _f(ex)
+
+
+#: the same, in SQL (execmirror.LIVE_QTY_SQL; the view imports no venue lane)
+_LQ = "coalesce(%slive_qty_exact, %slive_qty)"
+
+
 def _js(v):
     if isinstance(v, str):
         try:
@@ -156,7 +168,7 @@ async def view(conn, *, limit: int = 200) -> dict:
                       "avg_px": _f(r.get("paper_avg_px")),
                       "fees_usd": _f(r.get("paper_fees"))},
             "expected_scaled_qty": _f(r["scaled_qty"]),
-            "live": {"qty": r["live_qty"], "rounding_delta": _f(r["rounding_delta"]),
+            "live": {"qty": _live_qty(r), "rounding_delta": _f(r["rounding_delta"]),
                      "state": r["state"], "exclusion": r["exclusion"],
                      "exclusion_detail": ({k: det.get(k) for k in
                                            ("why", "cost_usd", "cap_usd",
@@ -226,7 +238,7 @@ async def view(conn, *, limit: int = 200) -> dict:
         realized_settle = _d(pos.get("realized")) if pos.get("expired") else Decimal(0)
         live_pnl = live_cash + live_open_value + realized_settle
         tgt = await conn.fetchval(
-            """SELECT coalesce(sum(live_qty), 0) FROM execmirror_orders
+            """SELECT coalesce(sum(""" + _LQ % ("", "") + """), 0) FROM execmirror_orders
                 WHERE group_id = ANY($1) AND role IN ('ENTRY','HEDGE') AND state <> 'EXCLUDED'""",
             groups)
         filled = sum(_d(f["qty"]) for f in fills if str(f["intent"]).startswith("ORDER_INTENT_BUY"))
@@ -592,7 +604,7 @@ def _actual_section(r: dict, scale, ctl: dict | None = None, gl: dict | None = N
     read = r.get("venue_order_id") is not None and (
         r.get("venue_state") is not None or r.get("last_polled_at") is not None
         or _d(r.get("cum_qty")) > 0)
-    live_qty = r.get("live_qty")
+    live_qty = _live_qty(r)
     wire = r.get("wire_price")
     sub_px = None
     if sent:
@@ -600,7 +612,7 @@ def _actual_section(r: dict, scale, ctl: dict | None = None, gl: dict | None = N
         sub_px = _f(pv) if pv is not None else _f(wire)
     notional = None
     if not excluded and live_qty and wire is not None:
-        notional = _f(_cpc(r["intent"], wire) * Decimal(live_qty))
+        notional = _f(_cpc(r["intent"], wire) * Decimal(str(live_qty)))
     lf_n = r.get("lf_n") or 0
     filled = _d(r.get("cum_qty")) if read else None
     avg = r.get("avg_px") if read and filled else None
@@ -778,13 +790,13 @@ async def _management(conn, rows: list) -> dict:
             out["paper_protection"][g["group_id"]] = dict(g)
         for g in await conn.fetch(
                 """SELECT g AS group_id,
-                          (SELECT coalesce(sum(m.live_qty - m.cum_qty), 0) FROM execmirror_orders m
+                          (SELECT coalesce(sum(coalesce(m.live_qty_exact, m.live_qty) - m.cum_qty), 0) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
                               AND m.state = ANY($2::text[])) AS resting,
                           (SELECT count(*) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
                               AND m.state = ANY($2::text[])) AS resting_orders,
-                          (SELECT coalesce(sum(m.live_qty - m.cum_qty), 0) FROM execmirror_orders m
+                          (SELECT coalesce(sum(coalesce(m.live_qty_exact, m.live_qty) - m.cum_qty), 0) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
                               AND m.state = ANY($3::text[])) AS pending,
                           (SELECT coalesce(sum(m.cum_qty), 0) FROM execmirror_orders m
@@ -1546,7 +1558,8 @@ async def decisions(conn, *, limit: int = 50) -> dict:
                   p.order_id AS p_order_id, p.state AS p_state, p.qty AS p_qty,
                   p.filled_qty AS p_filled, pf.avg_px AS pf_avg_px, pf.fees AS pf_fees,
                   m.mirror_id, m.state AS m_state, m.venue_order_id, m.venue_state,
-                  m.live_qty AS m_live_qty, m.cum_qty AS m_cum, m.avg_px AS m_avg_px,
+                  coalesce(m.live_qty_exact, m.live_qty) AS m_live_qty,
+                  m.cum_qty AS m_cum, m.avg_px AS m_avg_px,
                   m.fees_usd AS m_fees, m.submit_started_at, m.accepted_at,
                   m.latency_ms AS m_latency_ms
              FROM execution_intents i
@@ -1619,7 +1632,7 @@ async def decisions(conn, *, limit: int = 50) -> dict:
                                                "recorded (pre-200)")},
                        "state": r["actual_state"], "refusal": r["actual_refusal"],
                        "target_raw_qty": _f(r["live_raw_qty"]),
-                       "rounded_qty": r["live_qty"],
+                       "rounded_qty": _live_qty(r),
                        "rounding_delta": _f(r["rounding_delta"]),
                        "submitted_at": _iso(r.get("submit_started_at")),
                        "venue_order_id": r.get("venue_order_id"),

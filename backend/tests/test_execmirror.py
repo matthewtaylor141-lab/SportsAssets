@@ -607,8 +607,11 @@ async def test_insufficient_cash_and_the_minimum_size_are_exclusions(monkeypatch
         b = await _paper_order(conn, acct, qty=300)               # 0.3 contract
         await mirror.tick(conn)
         assert (await _row(conn, a["order_id"]))["exclusion"] == M.INSUFFICIENT_CASH
-        assert (await _row(conn, b["order_id"]))["exclusion"] == M.BELOW_VENUE_MINIMUM
-        assert venue.placed == []
+        # rc6.3 pmus-sizing: in SHADOW the market's own minimum is not read,
+        # so 0.3 is refused below the lane's whole-contract unit -- never
+        # called a VENUE minimum (most markets accept 0.30), never enlarged
+        assert (await _row(conn, b["order_id"]))["exclusion"] == M.R_BELOW_LANE_UNIT
+        assert venue.placed == [] and venue.market_reads == []
     finally:
         await conn.close()
 

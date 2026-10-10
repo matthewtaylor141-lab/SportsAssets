@@ -56,17 +56,26 @@ currency and settlement gates stay, and their approvals are versioned and
 hash-matched (live_rule_artifacts + live_approvals).
 
 RC6.3 PMUS-SIZING (contract audit item 3d) -- what step 4's sizing is now,
-in place of the whole-contract rounding item 4 above describes: outside
-SHADOW the market's own record is read (execmirror.Venue.market) and its
-minimum trade quantity, quantity increment and price tick are required, each
-refused by name when absent (never assumed to be 1); the limit price must be
-on the tick (never re-priced); the size is paper target / scale ROUNDED DOWN
-to a step that is a multiple of the market's increment and of the lane's
-unit (one contract: the lane's quantity columns are integers), refused
-BELOW_VENUE_MINIMUM below the market's minimum, never enlarged. In SHADOW
-nothing is read from the venue and the size is the lane's unit rule alone,
-labelled so. The sizing and the rules used are written on the intent's
-evidence (`live_sizing`); the rule is at execmirror.MARKET_RULES_VERSION.
+in place of the whole-contract rounding item 4 above describes. Whenever an
+order CAN be authorized (live_parity's SMALL LIVE mode is not SHADOW -- the
+exact condition live_parity.issue_live_authorization issues under), the
+market's own record is read FIRST (step 2b, execmirror.Venue.market, before
+every clock check, so the 10 s book and decision bounds are measured after
+the read) and its minimum trade quantity, quantity increment and price tick
+are required, each refused by name when absent (never assumed to be 1); the
+limit price must be on the tick (never re-priced); the size is paper target
+/ scale ROUNDED DOWN to the market's own increment -- 0.01 contracts on a
+fractional market, sent as a decimal quantity (2,419 paper at 1:1000 is
+2.41, stored exactly in live_qty_exact, migration 368), one contract on a
+whole-contract market -- and BELOW_VENUE_MINIMUM below the market's
+minimum, never enlarged. An order an authorization admits without those
+rules is refused by name (step 4c). In SHADOW nothing is read from the venue
+and the size is the lane's whole-contract unit rule alone, labelled so; a
+size below one contract there is not called a venue minimum, and is refused
+(R_BELOW_LANE_UNIT) only after the canonical check, which in SHADOW refuses
+every intent first. The sizing and the rules used are written on the
+intent's evidence (`live_sizing`); the rule is at
+execmirror.MARKET_RULES_VERSION.
 """
 from __future__ import annotations
 
@@ -148,27 +157,35 @@ def intent_id_for(decision_id: str) -> str:
 
 def live_sizing(paper_target_qty, scale, rules: dict | None = None) -> dict:
     """The ACTUAL BUY's size (rc6.3 pmus-sizing: execmirror.size_to_market):
-    paper target / scale, ROUNDED DOWN to a step that is a multiple of the
-    market's own quantity increment and of the lane's unit (one contract),
-    BELOW_VENUE_MINIMUM below the market's minimum -- never enlarged. Without
-    the market's rules (SHADOW: nothing is read from the venue) the lane's
-    unit rule alone, labelled so."""
+    paper target / scale, ROUNDED DOWN to the market's own quantity increment
+    (0.01 on a fractional market: a decimal quantity; 1 on a whole-contract
+    one), BELOW_VENUE_MINIMUM below the market's minimum -- never enlarged.
+    Without the market's rules (SHADOW: nothing is read from the venue) the
+    lane's whole-contract unit rule alone, labelled so, and below one
+    contract R_BELOW_LANE_UNIT. `live_qty` is an int when whole, else the
+    exact Decimal; `live_qty_int` / `live_qty_exact` are what the integer
+    column and migration 368's exact column record."""
     sz = M.size_to_market(paper_target_qty, scale, rules)
+    q_int, q_exact = M.live_qty_columns(sz["live_qty"])
     return {"live_scale": Decimal(str(scale)), "live_raw_qty": sz["raw_qty"],
-            "live_qty": int(sz["live_qty"]), "rounding_delta": sz["rounding_delta"],
+            "live_qty": M.qty_num(sz["live_qty"]), "live_qty_int": q_int,
+            "live_qty_exact": q_exact, "rounding_delta": sz["rounding_delta"],
             "refusal": sz["refusal"], "sizing": sz,
             "record": M.sizing_record(sz, rules)}
 
 
-def _small_live_is_shadow() -> bool:
-    """True when EITHER module that names the SMALL LIVE mode says SHADOW
-    (live_parity and live_authorization; migration 225 CHECKs the same).
-    Fail closed. The same rule as rc6/pmus-exec's
-    execmirror.small_live_is_shadow (one of the two to be kept when both
-    lanes are integrated)."""
-    from . import live_authorization as LA
-    return (LP.SMALL_LIVE_MODE == LP.MODE_SHADOW
-            or LA.SMALL_LIVE_MODE == LA.SHADOW)
+def _authorization_issuable() -> bool:
+    """True exactly when the canonical SMALL LIVE adapter CAN issue an order
+    authorization: live_parity.issue_live_authorization refuses only in
+    live_parity's SHADOW mode, and canonical_live_authorized verifies a token
+    against that same mode (live_authorization.authorized(token, mode=
+    live_parity.SMALL_LIVE_MODE)) -- live_authorization's own constant plays
+    no part. The protective market-rules read (step 2b) is switched by THIS
+    condition (rc6.3 pmus-sizing review: switching it by "either module says
+    SHADOW" let a partial activation -- live_parity not SHADOW,
+    live_authorization SHADOW -- send an order with no market rules read).
+    False in this release (SHADOW; migration 225 CHECKs it)."""
+    return LP.SMALL_LIVE_MODE != LP.MODE_SHADOW
 
 
 async def create(conn, *, decision_id: str, valuation_id, strategy: str,
@@ -302,7 +319,6 @@ class ActualLane:
         if it is None or it["actual_state"] != A_DISPATCHED:
             return {"state": "NOT_DISPATCHED"}
         it = dict(it)
-        now = self._now()
         # 1 · THE SWITCH AND THE IDENTITY
         ctl = await M.control(conn)
         if not ctl.get("enabled"):
@@ -339,6 +355,32 @@ class ActualLane:
             return await self._refuse(conn, it, adm["refusal"], t,
                                       admission_refusals=adm["refusals"],
                                       admission_version=AA.VERSION)
+        # 2b · THE MARKET'S OWN TRADING RULES (rc6.3 pmus-sizing; the rule at
+        #     execmirror.MARKET_RULES_VERSION) -- read whenever an order CAN
+        #     be authorized (_authorization_issuable: the exact condition the
+        #     canonical adapter issues under, so no authorized order is ever
+        #     sized without them), through the lane's own Venue (the
+        #     documented get-market-by-slug): its minimum, its quantity
+        #     increment and its price tick, each refused by name when absent;
+        #     the limit must be on the tick (never re-priced). Read HERE,
+        #     before every clock check below: a slow read can never send on a
+        #     book or a decision older than its bound (`now` is taken after
+        #     it). In SHADOW nothing is read from the venue -- no order can
+        #     be authorized there (step 4b).
+        rules = None
+        if _authorization_issuable():
+            _mark(t, "market_rules_start")
+            rules = await self._market_rules(it["us_market_slug"])
+            _mark(t, "market_rules_end")
+            if not rules.get("ok"):
+                return await self._refuse(conn, it, rules["refusal"], t,
+                                          market_rules=M.rules_record(rules))
+            off = M.price_tick_refusal(it["wire_price"], rules)
+            if off is not None:
+                return await self._refuse(conn, it, off.pop("refusal"), t,
+                                          **off)
+        # every age from here on is measured after the venue read above
+        now = self._now()
         # a live stream-book verdict is current only briefly: the rule's own
         # verdict-age bound at submission (P5_LIVE_STREAM_BOOK_V1 C13)
         vstale = LBC.verdict_age_refusal(
@@ -364,26 +406,16 @@ class ActualLane:
                                       basis="OUR_RECEIPT_INSTANT")
         _mark(t, "book_check_end")
         # 4 · LIVE SIZING ON THE MARKET'S OWN RULES, CAP AND ACCOUNT
-        #     (rc6.3 pmus-sizing; the rule at execmirror.MARKET_RULES_VERSION).
-        #     Outside SHADOW the market's own record is read first (the
-        #     documented get-market-by-slug, through the lane's own Venue):
-        #     its minimum, its quantity increment and its price tick, each
-        #     refused by name when absent; the limit must be on the tick
-        #     (never re-priced). In SHADOW nothing is read from the venue --
-        #     no order can be authorized there (step 4b) -- and the size is
-        #     the lane's unit rule alone, labelled so on the record.
+        #     (rc6.3 pmus-sizing). With the market's rules (2b): floor to its
+        #     own increment -- a decimal quantity on a 0.01-step market --
+        #     and BELOW_VENUE_MINIMUM below its minimum, never enlarged.
+        #     Without them (SHADOW) the lane's whole-contract unit, labelled
+        #     so; a size below one contract there is NOT refused here (the
+        #     market's minimum is unknown and, in SHADOW, the canonical check
+        #     refuses every intent by its true reason) but after 4b (4c).
         scale = ctl.get("scale") or 1000
-        rules = None
-        if not _small_live_is_shadow():
-            rules = await self._market_rules(it["us_market_slug"])
-            if not rules.get("ok"):
-                return await self._refuse(conn, it, rules["refusal"], t,
-                                          market_rules=M.rules_record(rules))
-            off = M.price_tick_refusal(it["wire_price"], rules)
-            if off is not None:
-                return await self._refuse(conn, it, off.pop("refusal"), t,
-                                          **off)
         size = live_sizing(it["paper_target_qty"], scale, rules)
+        unsized = size["refusal"] == M.R_BELOW_LANE_UNIT
         order = {"us_market_slug": it["us_market_slug"],
                  "intent": it["order_intent"], "qty": it["paper_target_qty"],
                  "wire_price": it["wire_price"],
@@ -399,13 +431,14 @@ class ActualLane:
         await conn.execute(
             """UPDATE execution_intents SET live_scale = $2, live_raw_qty = $3,
                  live_qty = $4, rounding_delta = $5,
-                 evidence = evidence || $6::jsonb, updated_at = now()
+                 evidence = evidence || $6::jsonb, live_qty_exact = $7,
+                 updated_at = now()
                WHERE intent_id = $1""",
             intent_id, size["live_scale"], size["live_raw_qty"],
-            size["live_qty"], size["rounding_delta"],
-            _j({"live_sizing": size["record"]}))
+            size["live_qty_int"], size["rounding_delta"],
+            _j({"live_sizing": size["record"]}), size["live_qty_exact"])
         _mark(t, "risk_check_end")
-        if size["refusal"]:
+        if size["refusal"] and not unsized:
             sz = size["sizing"]
             return await self._refuse(conn, it, size["refusal"], t,
                                       live_raw_qty=str(size["live_raw_qty"]),
@@ -413,23 +446,27 @@ class ActualLane:
                                       market_minimum=str(sz["market_minimum"]),
                                       step=str(sz["step"]),
                                       sizing_basis=sz["basis"],
-                                      why="never enlarged to reach the minimum")
-        # the decision's displayed depth must cover the ACTUAL quantity
+                                      why=M._below_why(sz, scale))
+        # the decision's displayed depth must cover the ACTUAL quantity (the
+        # 1:1000 target itself when the lane could not size it: an upper
+        # bound of any size the market's rules produce)
         adm_q = AA.evaluate(ev.get("admission_facts"),
                             slug=it["us_market_slug"],
                             order_intent=it["order_intent"],
-                            live_qty=size["live_qty"],
+                            live_qty=(size["live_raw_qty"] if unsized
+                                      else size["live_qty"]),
                             approved_book_rules=approved_rules,
                             approved_settlement_gates=approved_settle)
         if adm_q["verdict"] != AA.LIVE_ADMISSIBLE:
             return await self._refuse(conn, it, adm_q["refusal"], t,
                                       admission_refusals=adm_q["refusals"],
-                                      live_qty=size["live_qty"])
+                                      live_qty=str(size["live_qty"]))
         if plan is None:
             return await self._refuse(conn, it, R_ACCOUNT_UNKNOWN, t,
                                       snapshot_at=bp_at,
                                       limit_s=MAX_ACCOUNT_SNAPSHOT_AGE_S)
-        if plan.state != "PLANNED":
+        if plan.state != "PLANNED" and not (
+                unsized and plan.exclusion == M.R_BELOW_LANE_UNIT):
             return await self._refuse(conn, it, plan.exclusion, t,
                                       **{k: str(v) for k, v in plan.detail.items()})
         # 4b · R30A CONVERGENCE: NO ORIGINATION OUTSIDE A CANONICAL INTENT.
@@ -460,24 +497,48 @@ class ActualLane:
         if not canon.get("ok"):
             return await self._refuse(conn, it, canon["refusal"], t,
                                       canonical=canon.get("detail"))
+        # 4c · AN AUTHORIZED ORDER IS SIZED BY ITS MARKET'S OWN RULES (rc6.3
+        # pmus-sizing review): an authorization admits an order only when the
+        # market's minimum, step and tick were read and passed (2b) -- the
+        # lane's own invariant, checked again here so no change elsewhere can
+        # send a lane-unit size on a market it never read. A size below the
+        # lane's unit, which the lane could not size (no market rules), is
+        # refused by its true name; in SHADOW 4b has already refused, so only
+        # an authorization a lane-mechanics test states reaches this.
+        if canon.get("token") is not None and not (rules or {}).get("ok"):
+            return await self._refuse(conn, it, M.R_MARKET_RULES_NOT_READ, t,
+                                      market_rules=M.rules_record(rules),
+                                      sizing_basis=size["sizing"]["basis"])
+        if unsized:
+            sz = size["sizing"]
+            return await self._refuse(conn, it, M.R_BELOW_LANE_UNIT, t,
+                                      live_raw_qty=str(size["live_raw_qty"]),
+                                      computed_qty=str(sz["computed_qty"]),
+                                      step=str(sz["step"]),
+                                      sizing_basis=sz["basis"],
+                                      why=M._below_why(sz, scale))
         # 5 · THE CLAIM: at most one actual submission per intent
         mid = "ei:" + intent_id
+        # the order's quantity: exact (2.41) in live_qty_exact on a fractional
+        # market, live_qty then rounded up (migration 368)
+        lq_int, lq_exact = M.live_qty_columns(plan.live_qty)
         claimed = await conn.fetchval(
             """INSERT INTO execmirror_orders (mirror_id, execution_intent_id,
                  group_id, role, strategy, us_market_slug, intent, order_type,
                  tif, post_only, wire_price, paper_qty, scaled_qty, live_qty,
                  rounding_delta, state, paper_decided_at, submit_started_at,
-                 attempts, detail)
+                 attempts, detail, live_qty_exact)
                VALUES ($1,$2,$3,'ENTRY',$4,$5,$6,$7,$8,false,$9,$10,$11,$12,$13,
-                       'SUBMITTING',$14,now(),1,$15::jsonb)
+                       'SUBMITTING',$14,now(),1,$15::jsonb,$16)
                ON CONFLICT DO NOTHING RETURNING mirror_id""",
             mid, intent_id, it["group_id"], it["strategy"], it["us_market_slug"],
             it["order_intent"], it["order_type"], it["time_in_force"],
             it["wire_price"], it["paper_target_qty"], size["live_raw_qty"],
-            plan.live_qty, size["rounding_delta"], it["decided_at"],
+            lq_int, size["rounding_delta"], it["decided_at"],
             _j({"params": plan.params, "cost_usd": plan.detail.get("cost_usd"),
                 "execution_intent_id": intent_id,
-                "decision_id": it["decision_id"], "source": VERSION}))
+                "decision_id": it["decision_id"], "source": VERSION}),
+            lq_exact)
         if not claimed:
             return {"state": "DUPLICATE", "refusal": R_DUPLICATE}
         if self.mirror._buying_power is not None:
@@ -623,7 +684,8 @@ class ActualLane:
         so the priority-claimant census is unchanged) and parsed by
         execmirror.market_rules. Never raises: a read that fails is
         VENUE_MARKET_RECORD_UNREADABLE with the error; a record of another
-        market is refused the same way. Called only outside SHADOW."""
+        market is refused the same way. Called only when an order can be
+        authorized (_authorization_issuable), never in SHADOW."""
         try:
             rec = await asyncio.to_thread(self.mirror.venue().market, slug)
         except Exception as exc:                              # noqa: BLE001

@@ -233,7 +233,8 @@ async def load_and_size(conn, *, now, cal_report, attributions, risk_paper,
     actual = {}
     if ids:
         for r in await conn.fetch(
-                "SELECT DISTINCT ON (decision_id) decision_id, live_qty, "
+                "SELECT DISTINCT ON (decision_id) decision_id, "
+                "       coalesce(live_qty_exact, live_qty) AS live_qty, "
                 "       live_eligible, actual_state, actual_refusal "
                 "  FROM execution_intents WHERE decision_id = ANY($1::text[])"
                 " ORDER BY decision_id, created_at DESC", ids):

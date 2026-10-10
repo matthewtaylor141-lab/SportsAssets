@@ -2735,13 +2735,21 @@ NOT_REFUSAL = {
 #: minimum the venue's documentation states no quantity step for, and a
 #: decision's wire price that is not on the market's tick (never re-priced),
 #: are capability gaps of our sizing / pricing -- all SOFTWARE at risk
-#: admission, PRICE_NOT_ON_VENUE_TICK's row being the precedent.
+#: admission, PRICE_NOT_ON_VENUE_TICK's row being the precedent. A size below
+#: the lane's whole-contract unit when the market's own minimum and step were
+#: NOT read (SHADOW; raised only after the canonical check, which refuses
+#: every SHADOW intent first) is a capability limit of our sizing, never a
+#: venue minimum; an order an authorization admits without the market's
+#: rules read is the lane's own invariant broken (integrity), never sent.
 PMUS_SIZING_STREAM = {
     "VENUE_MARKET_RECORD_UNREADABLE": (S, DATA, "RISK_ADMISSION"),
     "MARKET_MINIMUM_TRADE_QTY_ABSENT": (S, DATA, "RISK_ADMISSION"),
     "MARKET_QUANTITY_INCREMENT_NOT_ESTABLISHED": (S, CAP, "RISK_ADMISSION"),
     "MARKET_PRICE_TICK_ABSENT": (S, DATA, "RISK_ADMISSION"),
     "LIMIT_PRICE_NOT_ON_THE_MARKET_TICK": (S, CAP, "RISK_ADMISSION"),
+    "BELOW_LANE_WHOLE_CONTRACT_UNIT_MARKET_RULES_NOT_READ":
+        (S, CAP, "RISK_ADMISSION"),
+    "MARKET_RULES_NOT_READ_FOR_AN_AUTHORIZED_ORDER": (S, INT, "RISK_ADMISSION"),
 }
 for _k, _v in PMUS_SIZING_STREAM.items():
     TABLE.setdefault(_k, _v)

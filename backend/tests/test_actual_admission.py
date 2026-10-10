@@ -333,10 +333,25 @@ async def test_below_venue_minimum_and_above_the_cap_are_never_placed(monkeypatc
     try:
         small = await _intent(e.conn, qty=300)            # 0.3 contracts -> 0
         got = await e.lane._run(e.conn, small["intent_id"])
-        assert got["refusal"] == M.BELOW_VENUE_MINIMUM
+        # rc6.3 pmus-sizing: SHADOW reads no market, so 0.3 is below the
+        # lane's whole-contract unit -- not a VENUE minimum (unknown here)
+        assert got["refusal"] == M.R_BELOW_LANE_UNIT
         big = await _intent(e.conn, qty=60000, wire=0.55)  # 60 x 0.55 = $33 > $25
         got = await e.lane._run(e.conn, big["intent_id"])
         assert got["refusal"] == M.ABOVE_ORDER_CAP
+        assert e.venue.placed == []
+        # with the market's own rules read (test-only non-SHADOW mode) on a
+        # whole-contract market (minimumTradeQty 1), 0.3 IS below the venue's
+        # minimum -- BELOW_VENUE_MINIMUM, never enlarged to 1
+        from sportsassets import live_parity as LP
+        monkeypatch.setattr(LP, "SMALL_LIVE_MODE", "LIVE_TEST_ONLY_NOT_IN_THIS_RELEASE")
+        whole = await _intent(e.conn, qty=300)
+        e.venue.markets[whole["us_market_slug"]] = {
+            "slug": whole["us_market_slug"], "minimumTradeQty": 1,
+            "orderPriceMinTickSize": 0.01}
+        got = await e.lane._run(e.conn, whole["intent_id"])
+        assert got["refusal"] == M.BELOW_VENUE_MINIMUM
+        assert e.venue.market_reads == [whole["us_market_slug"]]
         assert e.venue.placed == []
     finally:
         await _close(e)

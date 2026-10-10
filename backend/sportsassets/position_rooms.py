@@ -2067,7 +2067,8 @@ async def _actual_pm(conn, now: float) -> dict:
     for r in await conn.fetch(
             """SELECT mirror_id, paper_order_id, group_id, role, strategy,
                       us_market_slug, intent, order_type, tif, wire_price,
-                      good_till, live_qty, state, exclusion, venue_state,
+                      good_till, live_qty, live_qty_exact, state, exclusion,
+                      venue_state,
                       cum_qty, avg_px, fees_usd, created_at, updated_at,
                       accepted_at, execution_intent_id
                  FROM execmirror_orders
@@ -2083,7 +2084,9 @@ async def _actual_pm(conn, now: float) -> dict:
             "role": r["role"], "direction": direction_of_intent(r["intent"]),
             "holding_side": side, "slug": r["us_market_slug"],
             "order_type": r["order_type"], "tif": r["tif"],
-            "qty": float(r["live_qty"] or 0),
+            # exact (rc6.3 pmus-sizing, migration 368): a fractional order
+            "qty": float(r["live_qty_exact"] if r["live_qty_exact"] is not None
+                         else (r["live_qty"] or 0)),
             "filled_qty": float(r["cum_qty"] or 0),
             "limit": held_price(r["wire_price"], side),
             "wire_price": _f(r["wire_price"]),

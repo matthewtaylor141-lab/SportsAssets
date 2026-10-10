@@ -8,9 +8,12 @@ order derived from it, the venue's fills and the difference.
 
 THE RULES (owner: "set the rules to achieve the closest outcome")
   quantity   live = paper qty / scale (1,000), rounded to the NEAREST whole
-             contract (the venue's quantity is an integer); the rounding is
+             contract (plan_buy: the legacy mirror's rule); the rounding is
              recorded on the row. A paper order under half a live contract
              is EXCLUDED as BELOW_VENUE_MINIMUM, never rounded up to one.
+             The ACTUAL BUY is sized on the market's own rules instead (rc6.3
+             pmus-sizing, THE MARKET'S OWN TRADING RULES below): the venue
+             accepts decimal quantities where minimumTradeQty < 1.
   intent     copied: same contract (us_market_slug), same venue intent
              (BUY_LONG / BUY_SHORT / SELL_LONG / SELL_SHORT), same wire
              price, limit order, same time in force (IOC / FOK / GTD with
@@ -50,7 +53,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
@@ -227,10 +229,74 @@ def collateral_per_contract(intent: str, wire_price) -> Decimal:
     return (Decimal(1) - p) if intent == "ORDER_INTENT_BUY_SHORT" else p
 
 
+# ── A LIVE QUANTITY MAY BE FRACTIONAL (rc6.3 pmus-sizing, migration 368) ──
+#
+# Polymarket US: create-order's quantity is a number (double) that "Supports
+# decimal quantities on markets whose minimumTradeQty is less than 1"; the
+# order record's cumQuantity / leavesQuantity are numbers in contracts
+# (docs.polymarket.us create-order, read 2026-10-10). Most markets trade in
+# steps of 0.01 contracts, so an ACTUAL order -- and the inventory its fills
+# build -- can be 2.41 contracts. The integer columns execmirror_orders.
+# live_qty / execution_intents.live_qty keep a whole-contract row exactly as
+# before; a fractional row's exact quantity is live_qty_exact (live_qty then
+# holds it rounded UP, for a reader that knows only the integer column).
+# Every reader here reads coalesce(live_qty_exact, live_qty).
+FRACTIONAL_QTY_STEP = Decimal("0.01")
+WHOLE_QTY_STEP = Decimal(1)
+LIVE_QTY_SQL = "coalesce(live_qty_exact, live_qty)"
+
+
+def qty_num(v):
+    """A quantity as an int when it is a whole number of contracts (every
+    whole-contract path keeps the type and the JSON it always had), else the
+    exact Decimal. None stays None."""
+    if v is None:
+        return None
+    d = Decimal(str(v))
+    if not d.is_finite():
+        raise ValueError("QUANTITY_NOT_FINITE: %s" % v)
+    return int(d) if d == d.to_integral_value() else d
+
+
+def row_live_qty(row):
+    """A row's live quantity (execmirror_orders or execution_intents, any
+    mapping): live_qty_exact when the row carries one, else the integer
+    live_qty (qty_num)."""
+    ex = row.get("live_qty_exact")
+    if ex is not None:
+        return qty_num(ex)
+    return qty_num(row.get("live_qty") or 0)
+
+
+def live_qty_columns(q) -> tuple:
+    """(live_qty, live_qty_exact) to write for quantity `q`: a whole number
+    -> (q, NULL), exactly as before 368; a fractional one -> (q rounded UP,
+    q). The integer column never under-states what the order may tie up."""
+    d = Decimal(str(q or 0))
+    if d == d.to_integral_value():
+        return int(d), None
+    return int(d.to_integral_value(rounding=ROUND_CEILING)), d
+
+
+def wire_qty(q):
+    """THE CREATE-ORDER QUANTITY: a whole number as an int (the body every
+    whole-contract order has always carried); a fractional one as the JSON
+    number on the documented 0.01-contract step (size_to_market produces a
+    fractional size only for a market whose minimumTradeQty is below one
+    contract). A quantity finer than 0.01, or negative, is refused here --
+    before any client -- never rounded."""
+    d = Decimal(str(q if q is not None else 0))
+    if d == d.to_integral_value():
+        return int(d)
+    if d < 0 or d != d.quantize(FRACTIONAL_QTY_STEP):
+        raise ValueError("LIVE_QTY_FINER_THAN_THE_DOCUMENTED_0.01_STEP: %s" % d)
+    return float(d)
+
+
 @dataclass
 class Plan:
     state: str                         # PLANNED | EXCLUDED
-    live_qty: int = 0
+    live_qty: int | Decimal = 0        # a Decimal only when fractional (qty_num)
     scaled_qty: Decimal | None = None
     rounding_delta: Decimal | None = None
     exclusion: str | None = None
@@ -238,12 +304,12 @@ class Plan:
     detail: dict = field(default_factory=dict)
 
 
-def venue_params(order: dict, live_qty: int) -> dict:
+def venue_params(order: dict, live_qty) -> dict:
     tif = TIF.get(str(order["time_in_force"]))
     p = {"marketSlug": order["us_market_slug"], "intent": order["intent"],
          "type": "ORDER_TYPE_LIMIT",
          "price": {"value": "%.4f" % float(order["wire_price"]), "currency": "USD"},
-         "quantity": int(live_qty), "tif": tif}
+         "quantity": wire_qty(live_qty), "tif": tif}
     if tif == TIF["GTD"]:
         exp = order.get("expires_at")
         p["goodTillTime"] = (exp.isoformat() if hasattr(exp, "isoformat")
@@ -275,22 +341,37 @@ def plan_buy(order: dict, *, scale, buying_power, max_order_usd) -> Plan:
                 detail={"cost_usd": str(cost)}, **base)
 
 
-def plan_sell(order: dict, *, scale, paper_open_qty, live_held: int,
-              live_committed: int, opened_intent: str | None) -> Plan:
-    """A paper exit sells the same fraction of live inventory."""
+def plan_sell(order: dict, *, scale, paper_open_qty, live_held,
+              live_committed, opened_intent: str | None) -> Plan:
+    """A paper exit sells the same fraction of live inventory.
+
+    rc6.3 pmus-sizing: inventory may be FRACTIONAL (an ACTUAL BUY on a
+    0.01-step market, or a fractional fill of a whole order there). When the
+    held and committed quantities are whole numbers the rule, the types and
+    the order body are exactly as before (whole contracts, half-even; Kalshi
+    and the SHADOW parity adapter call this with whole numbers only). When
+    either is fractional the step is the documented 0.01 contract: a close
+    sells everything uncommitted exactly (never leaving 0.41 stranded, as
+    the whole-contract truncation did), a partial exit the same fraction
+    rounded half-even to 0.01, never more than is uncommitted."""
     if str(order.get("time_in_force")) not in TIF:
         return Plan("EXCLUDED", exclusion=UNSUPPORTED_ORDER)
     exact, _, delta = scale_qty(order["qty"], scale)
-    if live_held <= 0:
+    held = Decimal(str(live_held or 0))
+    committed = Decimal(str(live_committed or 0))
+    if held <= 0:
         return Plan("EXCLUDED", exclusion=NO_LIVE_INVENTORY, scaled_qty=exact,
                     detail={"why": "the live entry for this group holds nothing"})
     if opened_intent and EXIT_FOR.get(opened_intent) != order["intent"]:
         return Plan("EXCLUDED", exclusion=INTENT_MISMATCH, scaled_qty=exact,
                     detail={"opened_with": opened_intent, "paper": order["intent"]})
-    available = live_held - live_committed
+    available = held - committed
     if available <= 0:
         return Plan("EXCLUDED", exclusion=INVENTORY_COMMITTED, scaled_qty=exact,
                     detail={"held": live_held, "committed": live_committed})
+    whole = (held == held.to_integral_value()
+             and committed == committed.to_integral_value())
+    step = WHOLE_QTY_STEP if whole else FRACTIONAL_QTY_STEP
     q = Decimal(str(order["qty"]))
     po = Decimal(str(paper_open_qty or 0))
     closes = po <= 0 or q >= po
@@ -299,11 +380,16 @@ def plan_sell(order: dict, *, scale, paper_open_qty, live_held: int,
         frac = Decimal(1)
     else:
         frac = q / po
-        live = int((frac * live_held).quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+        live = (frac * held / step).quantize(Decimal(1),
+                                             rounding=ROUND_HALF_EVEN) * step
         live = min(live, available)
-    if live < 1:
+    if not whole:
+        # never finer than the documented step (wire_qty refuses finer)
+        live = (live / step).to_integral_value(rounding=ROUND_FLOOR) * step
+    if live < step:
         return Plan("EXCLUDED", exclusion=BELOW_VENUE_MINIMUM, scaled_qty=exact,
                     detail={"fraction": str(frac), "held": live_held})
+    live = qty_num(live)
     return Plan("PLANNED", live_qty=live, scaled_qty=exact,
                 rounding_delta=Decimal(live) - exact,
                 params=venue_params(order, live),
@@ -316,23 +402,28 @@ def plan_sell(order: dict, *, scale, paper_open_qty, live_held: int,
 # THE DEFECT (contract audit item 3d). An ACTUAL BUY was sized by scale_qty
 # -- paper qty / scale rounded HALF-EVEN to whole contracts -- and never read
 # the market it trades: a $1,500 PAPER decision at 0.62 (2,419 contracts) is
-# 2.419 at 1:1000 and went out as 2; 2.702 went out as 3 (ABOVE the 1:1000
-# target); a market whose minimum is above one contract would have been sent
-# below it; and no limit price was checked against the market's tick.
+# 2.419 at 1:1000 and went out as 2 ($1.24 against a $1.50 target); 2.702
+# went out as 3 (ABOVE the 1:1000 target); 0.833 was refused although the
+# venue accepts 0.83; a market whose minimum is above one contract would
+# have been sent below it; and no limit price was checked against the tick.
 #
 # THE VENUE'S RULES (docs.polymarket.us, read 2026-10-10):
-#   get-market-by-slug  minimumTradeQty: "Minimum order quantity in contracts
-#                       (e.g. 0.01 = 1% of a contract, 1.0 = one whole
-#                       contract)"; orderPriceMinTickSize: "Minimum tick size
-#                       for order price". No field states a quantity step.
+#   get-market-by-slug  minimumTradeQty (number, decimal): "Minimum order
+#                       quantity in contracts (e.g. 0.01 = 1% of a contract,
+#                       1.0 = one whole contract)"; orderPriceMinTickSize:
+#                       "Minimum tick size for order price". No field states
+#                       a quantity step.
 #   fractional shares   "These markets trade in steps of 0.01 contracts";
 #                       "A small number of markets, mostly futures, still
 #                       trade in whole contracts only"; a quantity is
 #                       "rounded down to the market's step size: 0.01
 #                       contracts on most markets, or 1 contract on
 #                       whole-contract markets".
-#   create-order        quantity "Supports decimal quantities on markets whose
-#                       minimumTradeQty is less than 1".
+#   create-order        quantity (number, double): "Order quantity in
+#                       contracts. Supports decimal quantities on markets
+#                       whose minimumTradeQty is less than 1"; the order
+#                       record's cumQuantity / leavesQuantity are numbers in
+#                       contracts.
 # So a market's QUANTITY INCREMENT is the documented step its minimumTradeQty
 # selects: 0.01 when the minimum is below one contract (and is itself a
 # multiple of 0.01), one contract when the minimum is one or more WHOLE
@@ -340,27 +431,19 @@ def plan_sell(order: dict, *, scale, paper_open_qty, live_held: int,
 # describe: its increment is NOT established and the order is refused by
 # name. Nothing is ever assumed -- no field is defaulted to 1.
 #
-# THE LANE'S OWN UNIT (LANE_QTY_UNIT). execmirror_orders.live_qty and
-# execution_intents.live_qty are INTEGER columns (migrations 192, 199); every
-# SELL of an actual position (live_inventory, plan_sell) counts whole
-# contracts, and retyping either column is ROLLBACK_COLUMN_TYPE_CHANGED,
-# which tools/upgrade_path_receipt.py blocks. So the lane records and sends
-# multiples of one contract: a BUY is sized to the smallest step that is a
-# multiple of BOTH the market's increment and the lane's unit (their least
-# common multiple -- one contract on every documented market), rounded DOWN.
-# The exact size at the market's own increment is computed and recorded
-# beside it (`market_exact_qty`), so what the lane's unit costs against the
-# 1:1000 target is on the record; sending it needs numeric quantity storage
-# and a fractional SELL path first.
-#
 # THE RULE (pure: market_rules, size_to_market, price_tick_refusal,
-# plan_entry_on_market; the ACTUAL lane applies it, execution_intent step 4):
-#   rules   read from the market's own record (Venue.market); a field absent,
-#           unreadable or outside the documentation -> refused by its own
-#           name;
-#   size    raw = paper qty / scale exactly; live = floor(raw / step) x step;
-#           live below the market's minimum (or zero) -> BELOW_VENUE_MINIMUM,
-#           never enlarged to reach it;
+# plan_entry_on_market; the ACTUAL lane applies it, execution_intent steps
+# 2b and 4):
+#   rules   read from the market's own record (Venue.market) whenever an
+#           order CAN be authorized (live_parity's SMALL LIVE mode is not
+#           SHADOW); a field absent, unreadable or outside the documentation
+#           -> refused by its own name;
+#   size    raw = paper qty / scale exactly; live = floor(raw / increment) x
+#           increment -- 2.419 -> 2.41 on a 0.01 market, 2 on a whole-contract
+#           one; live below the market's minimum (or zero) ->
+#           BELOW_VENUE_MINIMUM, never enlarged to reach it. A fractional size
+#           is SENT fractional (wire_qty: the JSON number; migration 368
+#           stores it exactly, execmirror_orders.live_qty_exact);
 #   price   the limit (wire) price must be an exact multiple of the market's
 #           tick, inside (0, 1), and exactly what the order carries at its 4
 #           decimals (venue_params); otherwise LIMIT_PRICE_NOT_ON_THE_MARKET_
@@ -369,16 +452,19 @@ def plan_sell(order: dict, *, scale, paper_open_qty, live_held: int,
 #           (live_parity.authorize_live_exposure refuses one);
 #   caps    cost = collateral per contract x live, against the per-order cap
 #           and the buying power, as plan_buy.
-# Without the market's record (SMALL LIVE is SHADOW: the lane reads nothing
-# from the venue, and no order can be authorized) the size is the lane's unit
-# rule alone and is labelled so (SIZING_BASIS_LANE_UNIT_ONLY): an upper bound
-# of what the market rule would size, never sent.
-MARKET_RULES_VERSION = "PMUS_MARKET_TRADING_RULES_V1"
-ENTRY_SIZING_RULE = ("FLOOR_TO_LCM(MARKET_QTY_INCREMENT, LANE_QTY_UNIT); "
-                     "BELOW_MARKET_MINIMUM_REFUSED; LIMIT_ON_MARKET_TICK")
-LANE_QTY_UNIT = Decimal(1)
-FRACTIONAL_QTY_STEP = Decimal("0.01")
-WHOLE_QTY_STEP = Decimal(1)
+# WITHOUT the market's record (SMALL LIVE is SHADOW: nothing is read from the
+# venue, and no order can be authorized) the size is the lane's whole-contract
+# unit rule alone, labelled so (SIZING_BASIS_LANE_UNIT_ONLY): floor to whole
+# contracts. Below one contract it is NOT called BELOW_VENUE_MINIMUM -- the
+# market's minimum was not read -- but R_BELOW_LANE_UNIT, and the ACTUAL lane
+# raises even that only after the canonical authorization check (which in
+# SHADOW refuses every intent by its true reason), so it is reached only under
+# an authorization a lane-mechanics test states.
+MARKET_RULES_VERSION = "PMUS_MARKET_TRADING_RULES_V2"
+ENTRY_SIZING_RULE = ("FLOOR_TO_MARKET_QTY_INCREMENT; BELOW_MARKET_MINIMUM_REFUSED; "
+                     "DECIMAL_QTY_WHERE_MINIMUM_BELOW_ONE; LIMIT_ON_MARKET_TICK")
+#: the whole-contract unit used ONLY when the market's rules were not read
+LANE_QTY_UNIT = WHOLE_QTY_STEP
 MIN_QTY_FIELDS = ("minimumTradeQty", "minimum_trade_qty")
 PRICE_TICK_FIELDS = ("orderPriceMinTickSize", "order_price_min_tick_size")
 SIZING_BASIS_MARKET = "MARKET_TRADING_RULES"
@@ -388,6 +474,12 @@ R_MIN_QTY_ABSENT = "MARKET_MINIMUM_TRADE_QTY_ABSENT"
 R_QTY_INCREMENT_NOT_ESTABLISHED = "MARKET_QUANTITY_INCREMENT_NOT_ESTABLISHED"
 R_PRICE_TICK_ABSENT = "MARKET_PRICE_TICK_ABSENT"
 R_PRICE_OFF_TICK = "LIMIT_PRICE_NOT_ON_THE_MARKET_TICK"
+#: below one whole contract when the market's own minimum and step were NOT
+#: read (SHADOW): the lane's unit binds, the venue's minimum is unknown
+R_BELOW_LANE_UNIT = "BELOW_LANE_WHOLE_CONTRACT_UNIT_MARKET_RULES_NOT_READ"
+#: an order an authorization admits, without the market's rules read: the
+#: lane's own invariant (execution_intent step 4c), never sent
+R_MARKET_RULES_NOT_READ = "MARKET_RULES_NOT_READ_FOR_AN_AUTHORIZED_ORDER"
 
 
 def _rule_field(m: dict, names: tuple):
@@ -417,8 +509,8 @@ def market_rules(record, *, slug: str | None = None) -> dict:
     get-market-by-slug answer ({"market": {...}} or the market itself). Every
     field absent, unreadable, non-positive or outside the documented steps is
     named in `missing`; `refusal` is the first of them. `slug`, when given,
-    must be the record's own slug (a record of another market is
-    unreadable for this one)."""
+    must be the record's OWN slug: a record of another market, or one that
+    names no market, is unreadable for this one."""
     m = record.get("market") if isinstance(record, dict) and \
         isinstance(record.get("market"), dict) else record
     out = {"ok": False, "version": MARKET_RULES_VERSION, "refusal": None,
@@ -430,10 +522,13 @@ def market_rules(record, *, slug: str | None = None) -> dict:
                     missing=[R_MARKET_RECORD_UNREADABLE],
                     why="the venue returned no market record")
     out["slug"] = m.get("slug")
-    if slug is not None and m.get("slug") not in (None, slug):
+    if slug is not None and m.get("slug") != slug:
         return dict(out, refusal=R_MARKET_RECORD_UNREADABLE,
                     missing=[R_MARKET_RECORD_UNREADABLE],
-                    why="the record names another market (%s)" % m.get("slug"))
+                    why=("the record names another market (%s)" % m.get("slug")
+                         if m.get("slug") is not None else
+                         "the record names no market: it cannot be shown to "
+                         "be this market's (%s)" % slug))
     mf, mv = _rule_field(m, MIN_QTY_FIELDS)
     tf, tv = _rule_field(m, PRICE_TICK_FIELDS)
     out["fields"] = {"minimum_trade_qty": mf, "price_tick": tf}
@@ -448,7 +543,7 @@ def market_rules(record, *, slug: str | None = None) -> dict:
         if mn < 1 and mn % FRACTIONAL_QTY_STEP == 0:
             step, basis = FRACTIONAL_QTY_STEP, (
                 "DOCUMENTED: minimumTradeQty < 1 -> fractional market, steps "
-                "of 0.01 contracts")
+                "of 0.01 contracts, decimal quantities accepted")
         elif mn >= 1 and mn % WHOLE_QTY_STEP == 0:
             step, basis = WHOLE_QTY_STEP, (
                 "DOCUMENTED: minimumTradeQty a whole number >= 1 -> "
@@ -469,50 +564,38 @@ def market_rules(record, *, slug: str | None = None) -> dict:
     return dict(out, ok=True)
 
 
-def lane_qty_step(increment: Decimal, unit: Decimal = LANE_QTY_UNIT) -> Decimal:
-    """The smallest positive quantity that is a multiple of BOTH `increment`
-    (the market's) and `unit` (what the lane can record): their least common
-    multiple, exactly (pure)."""
-    inc, un = Decimal(str(increment)), Decimal(str(unit))
-    if inc <= 0 or un <= 0:
-        raise ValueError("QTY_STEP_NOT_POSITIVE")
-    e = max(0, -inc.as_tuple().exponent, -un.as_tuple().exponent)
-    k = Decimal(10) ** e
-    a, b = int(inc * k), int(un * k)
-    if Decimal(a) != inc * k or Decimal(b) != un * k:
-        raise ValueError("QTY_STEP_NOT_A_TERMINATING_DECIMAL")
-    return Decimal(a * b // math.gcd(a, b)) / k
-
-
 def _floor_to(q: Decimal, step: Decimal) -> Decimal:
     return (q / step).to_integral_value(rounding=ROUND_FLOOR) * step
 
 
-def size_to_market(paper_qty, scale, rules: dict | None = None, *,
-                   unit: Decimal = LANE_QTY_UNIT) -> dict:
+def size_to_market(paper_qty, scale, rules: dict | None = None) -> dict:
     """A BUY's live size at 1:`scale` (pure). With the market's rules
-    (market_rules, ok): floor to lane_qty_step(the market's increment, `unit`)
-    and refuse below the market's minimum; without them: the lane's unit rule
-    alone (step = minimum = `unit`), labelled SIZING_BASIS_LANE_UNIT_ONLY.
-    Never enlarged: live <= raw always. `live_qty` is 0 when refused."""
+    (market_rules, ok): floor to the market's own increment and refuse below
+    the market's minimum (BELOW_VENUE_MINIMUM). Without them (SHADOW): the
+    lane's whole-contract unit alone, labelled SIZING_BASIS_LANE_UNIT_ONLY,
+    and below one contract R_BELOW_LANE_UNIT -- never BELOW_VENUE_MINIMUM, the
+    market's minimum being unknown. Never enlarged: live <= raw always, and
+    short of raw by less than one step. `live_qty` (a Decimal) is 0 when
+    refused; `decimal_quantity` says the size is not a whole number."""
     raw = Decimal(str(paper_qty)) / Decimal(str(scale))
-    if rules is not None and rules.get("ok"):
-        inc, minimum = rules["quantity_increment"], rules["minimum_trade_qty"]
-        basis = SIZING_BASIS_MARKET
+    market = rules is not None and bool(rules.get("ok"))
+    if market:
+        step, minimum = rules["quantity_increment"], rules["minimum_trade_qty"]
+        basis, below = SIZING_BASIS_MARKET, BELOW_VENUE_MINIMUM
     else:
-        inc, minimum, basis = unit, unit, SIZING_BASIS_LANE_UNIT_ONLY
-    step = lane_qty_step(inc, unit)
+        step, minimum = LANE_QTY_UNIT, LANE_QTY_UNIT
+        basis, below = SIZING_BASIS_LANE_UNIT_ONLY, R_BELOW_LANE_UNIT
     computed = _floor_to(raw, step) if raw > 0 else Decimal(0)
-    exact_at_market = _floor_to(raw, inc) if raw > 0 else Decimal(0)
     refused = computed <= 0 or computed < minimum
     live = Decimal(0) if refused else computed
     return {"rule": ENTRY_SIZING_RULE, "basis": basis,
             "scale": Decimal(str(scale)), "raw_qty": raw,
             "computed_qty": computed, "live_qty": live,
-            "rounding_delta": live - raw,
-            "market_increment": inc, "lane_unit": unit, "step": step,
-            "market_minimum": minimum, "market_exact_qty": exact_at_market,
-            "refusal": BELOW_VENUE_MINIMUM if refused else None}
+            "rounding_delta": live - raw, "step": step, "minimum": minimum,
+            "market_increment": step if market else None,
+            "market_minimum": minimum if market else None,
+            "decimal_quantity": live != live.to_integral_value(),
+            "refusal": below if refused else None}
 
 
 def _s(v):
@@ -539,10 +622,10 @@ def sizing_record(size: dict, rules: dict | None) -> dict:
     """The JSON-safe record of one sizing and the rules it used (written on
     the execution intent's evidence as `live_sizing`)."""
     rec = {k: _s(size.get(k)) for k in (
-        "raw_qty", "computed_qty", "live_qty", "rounding_delta",
-        "market_increment", "lane_unit", "step", "market_minimum",
-        "market_exact_qty", "scale")}
+        "raw_qty", "computed_qty", "live_qty", "rounding_delta", "step",
+        "minimum", "market_increment", "market_minimum", "scale")}
     rec.update(rule=size.get("rule"), basis=size.get("basis"),
+               decimal_quantity=bool(size.get("decimal_quantity")),
                refusal=size.get("refusal"), market_rules=rules_record(rules))
     return rec
 
@@ -580,10 +663,24 @@ def price_tick_refusal(wire_price, rules: dict) -> dict | None:
             "never_repriced": "the canonical intent fixes the wire price"}
 
 
+def _below_why(sz: dict, scale) -> str:
+    """The TRUE reason a size was refused (pure)."""
+    if sz["refusal"] == BELOW_VENUE_MINIMUM:
+        return ("paper qty / %s is %s; at the market's own step %s that is %s, "
+                "below the market's minimum %s -- never enlarged"
+                % (scale, sz["raw_qty"], sz["step"], sz["computed_qty"],
+                   sz["minimum"]))
+    return ("paper qty / %s is %s: below one whole contract, the lane's unit "
+            "when the market's own minimum and step were not read (SMALL LIVE "
+            "is SHADOW) -- not a venue minimum, and never enlarged"
+            % (scale, sz["raw_qty"]))
+
+
 def plan_entry_on_market(order: dict, *, scale, buying_power, max_order_usd,
                          rules: dict | None) -> Plan:
     """THE ACTUAL BUY's plan on the market's own rules (pure): the order form,
-    the tick (with rules), the size (size_to_market), then the per-order cap
+    the tick (with rules), the size (size_to_market: a fractional size on a
+    0.01-step market is planned and sent fractional), then the per-order cap
     and the buying power exactly as plan_buy. `detail` carries the sizing,
     flat and stringified."""
     if str(order.get("time_in_force")) not in TIF:
@@ -599,22 +696,16 @@ def plan_entry_on_market(order: dict, *, scale, buying_power, max_order_usd,
             return Plan("EXCLUDED", exclusion=off.pop("refusal"), detail=off)
     sz = size_to_market(order["qty"], scale, rules)
     sdet = {"sizing_rule": sz["rule"], "sizing_basis": sz["basis"],
-            "sizing_step": str(sz["step"]),
-            "market_minimum": str(sz["market_minimum"]),
-            "computed_qty": str(sz["computed_qty"]),
-            "market_exact_qty": str(sz["market_exact_qty"])}
+            "sizing_step": str(sz["step"]), "sizing_minimum": str(sz["minimum"]),
+            "market_minimum": _s(sz["market_minimum"]),
+            "computed_qty": str(sz["computed_qty"])}
     base = dict(scaled_qty=sz["raw_qty"], rounding_delta=sz["rounding_delta"])
     if sz["refusal"]:
         return Plan("EXCLUDED", exclusion=sz["refusal"], **base,
-                    detail=dict(sdet, why=(
-                        "paper qty / %s is %s: below the market's minimum %s "
-                        "at step %s, never enlarged"
-                        % (scale, sz["raw_qty"], sz["market_minimum"],
-                           sz["step"]))))
-    if sz["live_qty"] != sz["live_qty"].to_integral_value():
-        raise ValueError("LIVE_QTY_NOT_A_WHOLE_NUMBER_OF_CONTRACTS")
-    live = int(sz["live_qty"])
-    cost = collateral_per_contract(order["intent"], order["wire_price"]) * live
+                    detail=dict(sdet, why=_below_why(sz, scale)))
+    live = qty_num(sz["live_qty"])
+    cost = collateral_per_contract(order["intent"], order["wire_price"]) * \
+        Decimal(str(live))
     if cost > Decimal(str(max_order_usd)):
         return Plan("EXCLUDED", exclusion=ABOVE_ORDER_CAP, live_qty=live, **base,
                     detail=dict(sdet, cost_usd=str(cost),
@@ -630,9 +721,10 @@ def plan_entry_on_market(order: dict, *, scale, buying_power, max_order_usd,
 def live_qty_rule_broken(live_qty, scaled_qty, live_sizing=None) -> bool:
     """AUDREY'S CHECK of a row's live size against the rule that sized it
     (pure). A row the ACTUAL lane sized on this rule (its intent carries the
-    `live_sizing` record, with its step) breaks it when the live size is
-    ABOVE the scaled target (enlarged) or short of it by a whole step or
-    more; any other row (plan_buy / scale_qty: the nearest whole contract)
+    `live_sizing` record, with its step: 0.01 on a fractional market, 1 on a
+    whole-contract one or without the market's rules) breaks it when the live
+    size is ABOVE the scaled target (enlarged) or short of it by a whole step
+    or more; any other row (plan_buy / scale_qty: the nearest whole contract)
     when it is more than half a contract away, as before."""
     live, scaled = Decimal(str(live_qty)), Decimal(str(scaled_qty))
     ls = live_sizing
@@ -687,15 +779,29 @@ def _amt(v):
         return None
 
 
+def _qty_of(v) -> Decimal | None:
+    """A venue quantity (a number, possibly fractional: 2.41) as a Decimal,
+    or None when it is absent or not a finite number (pure)."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        d = Decimal(str(v))
+    except Exception:                                         # noqa: BLE001
+        return None
+    return d if d.is_finite() else None
+
+
 def _shape(row: dict) -> tuple:
     """What an attempt asked for -- its only identity on a venue that has no
-    client order id: market, intent, wire price (4 dp), whole contracts."""
+    client order id: market, intent, wire price (4 dp), quantity (exact:
+    row_live_qty, so a fractional order of 2.41 is matched as 2.41, never
+    truncated to 2; rc6.3 pmus-sizing)."""
     try:
         px = Decimal(str(row["wire_price"])).quantize(Decimal("0.0001"))
     except Exception:                                         # noqa: BLE001
         px = None
     return (row.get("us_market_slug"), row.get("intent"), px,
-            int(row.get("live_qty") or 0))
+            Decimal(str(row_live_qty(row))))
 
 
 def _epoch_of(v) -> float | None:
@@ -776,9 +882,8 @@ def match_unknown_open(row: dict, open_orders: list, *, rivals=()) -> dict:
     want = _shape(row)
     cands = []
     for o in open_orders or []:
-        try:
-            q = int(o.get("quantity") or 0)
-        except (TypeError, ValueError):
+        q = _qty_of(o.get("quantity") or 0)
+        if q is None:
             continue
         px = _amt(o.get("price"))
         if (o.get("marketSlug") == want[0] and o.get("intent") == want[1]
@@ -890,10 +995,7 @@ def match_unknown_trade(row: dict, trades: list, *, mapped: set,
         if _before_the_attempt(row, at):
             continue                      # traded before this attempt began
         px = _amt(t.get("price"))
-        try:
-            q = None if t.get("quantity") is None else int(t.get("quantity"))
-        except (TypeError, ValueError):
-            q = None
+        q = _qty_of(t.get("quantity"))
         if oid and at is not None and intent == want[1] and q == want[3] \
                 and px is not None \
                 and px.quantize(Decimal("0.0001")) == want[2]:
@@ -1222,7 +1324,8 @@ class Venue:
         get-market-by-slug read (GET /v1/market/slug/{slug}; read-only, paced,
         never retried here). Its minimumTradeQty and orderPriceMinTickSize
         are what an ACTUAL BUY is sized and priced against (market_rules).
-        Called only outside SHADOW (execution_intent step 4)."""
+        Called only when an order can be authorized -- live_parity's SMALL
+        LIVE mode is not SHADOW (execution_intent step 2b) -- never in SHADOW."""
         r = self._call(self._c.markets.retrieve_by_slug, slug) or {}
         return r.get("market") if isinstance(r.get("market"), dict) else r
 
@@ -1406,14 +1509,21 @@ async def late_submit_answer(conn, mirror_id: str, *, vid, classified: str,
 
 async def live_inventory(conn, group_id) -> dict:
     """Filled live contracts for a group, from venue-confirmed fills only,
-    and the live sell quantity already committed to open exits."""
+    and the live sell quantity already committed to open exits.
+
+    rc6.3 pmus-sizing: EXACT, not truncated to whole contracts. A fractional
+    ACTUAL BUY (2.41 on a 0.01-step market), or a fractional fill of a whole
+    order there, holds 2.41 -- the whole-contract truncation read 2 and left
+    0.41 that no exit, close or flatten would ever sell. Whole quantities
+    stay ints (qty_num), exactly as before."""
     r = await conn.fetchrow(
         """SELECT
              coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0) AS bought,
              coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_SELL%'), 0) AS sold
            FROM execmirror_fills WHERE group_id = $1""", group_id)
     committed = await conn.fetchval(
-        """SELECT coalesce(sum(live_qty - cum_qty), 0) FROM execmirror_orders
+        """SELECT coalesce(sum(""" + LIVE_QTY_SQL + """ - cum_qty), 0)
+             FROM execmirror_orders
             WHERE group_id = $1 AND intent LIKE 'ORDER_INTENT_SELL%'
               AND state IN ('PLANNED','SUBMITTING','UNKNOWN','OPEN',
                             'PARTIALLY_FILLED','CANCEL_REQUESTED')""", group_id)
@@ -1421,8 +1531,9 @@ async def live_inventory(conn, group_id) -> dict:
         """SELECT intent FROM execmirror_orders WHERE group_id = $1
               AND intent LIKE 'ORDER_INTENT_BUY%' AND cum_qty > 0
             ORDER BY created_at LIMIT 1""", group_id)
-    held = int(Decimal(str(r["bought"])) - Decimal(str(r["sold"])))
-    return {"held": max(held, 0), "committed": int(committed or 0),
+    held = Decimal(str(r["bought"])) - Decimal(str(r["sold"]))
+    return {"held": qty_num(max(held, Decimal(0))),
+            "committed": qty_num(Decimal(str(committed or 0))),
             "opened_intent": opened}
 
 
@@ -1860,13 +1971,17 @@ class Mirror:
     async def _insert(self, conn, o, plan: Plan, *, mirror_id=None, role=None,
                       parent=None):
         mid = mirror_id or "em:" + o["order_id"]
+        # a fractional quantity (an exit of fractional inventory) keeps its
+        # exact value in live_qty_exact, live_qty rounded up (migration 368)
+        lq_int, lq_exact = live_qty_columns(plan.live_qty)
         await conn.execute(
             """INSERT INTO execmirror_orders (mirror_id, paper_order_id, parent_mirror_id,
                  group_id, role, strategy, us_market_slug, intent, order_type, tif,
                  post_only, wire_price, good_till, paper_qty, scaled_qty, live_qty,
-                 rounding_delta, state, exclusion, paper_decided_at, detail)
+                 rounding_delta, state, exclusion, paper_decided_at, detail,
+                 live_qty_exact)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                       $18,$19,$20,$21::jsonb)
+                       $18,$19,$20,$21::jsonb,$22)
                ON CONFLICT (mirror_id) DO NOTHING""",
             mid, None if mirror_id else o["order_id"], parent, o["group_id"],
             role or o["role"], o.get("strategy") or o.get("decision_strategy"),
@@ -1874,9 +1989,10 @@ class Mirror:
             o.get("time_in_force") or "IOC",
             bool(plan.params.get("participateDontInitiate")),
             o.get("wire_price"), o.get("expires_at"), o.get("qty"),
-            plan.scaled_qty, plan.live_qty, plan.rounding_delta, plan.state,
+            plan.scaled_qty, lq_int, plan.rounding_delta, plan.state,
             plan.exclusion, o.get("decided_at"),
-            _j(dict(plan.detail, params=plan.params, label=o.get("label"))))
+            _j(dict(plan.detail, params=plan.params, label=o.get("label"))),
+            lq_exact)
         await _event(conn, "PLANNED" if plan.state == "PLANNED" else "EXCLUDED",
                      mirror_id=mid, paper_order_id=o.get("order_id"),
                      exclusion=plan.exclusion, live_qty=plan.live_qty)
@@ -2056,8 +2172,8 @@ class Mirror:
         vstate = o.get("state")
         async with conn.transaction():
             cur = await conn.fetchrow(
-                """SELECT group_id, us_market_slug, intent, live_qty, cum_qty,
-                          avg_px, fees_usd, state, detail
+                """SELECT group_id, us_market_slug, intent, live_qty,
+                          live_qty_exact, cum_qty, avg_px, fees_usd, state, detail
                      FROM execmirror_orders WHERE mirror_id = $1 FOR UPDATE""",
                 r["mirror_id"])
             if cur is None:
@@ -2080,7 +2196,7 @@ class Mirror:
                              price=str(d["price"]), fee=str(d["fee"]))
             if vstate in VENUE_TERMINAL:
                 state = VENUE_TERMINAL[vstate]
-                if state == "CANCELLED" and cum >= Decimal(cur["live_qty"] or 0) > 0:
+                if state == "CANCELLED" and cum >= Decimal(str(row_live_qty(cur))) > 0:
                     state = "FILLED"
             elif cum > 0:
                 state = ("CANCEL_REQUESTED" if cur["state"] == "CANCEL_REQUESTED"
@@ -2130,7 +2246,7 @@ class Mirror:
         state = cur["state"]
         if vstate in VENUE_TERMINAL:
             state = VENUE_TERMINAL[vstate]
-            if state == "CANCELLED" and prev_cum >= Decimal(cur["live_qty"] or 0) > 0:
+            if state == "CANCELLED" and prev_cum >= Decimal(str(row_live_qty(cur))) > 0:
                 state = "FILLED"
         now = self._now()
         await conn.execute(
@@ -2174,7 +2290,9 @@ class Mirror:
             if cur["state"] in ("PLANNED", "SUBMITTING", "UNKNOWN", "CANCEL_REQUESTED"):
                 continue                     # something is in flight
             inv = await live_inventory(conn, p["group_id"])
-            mine_open = (int(cur["live_qty"]) - int(cur["cum_qty"] or 0)
+            # exact (rc6.3 pmus-sizing): a fractional protection is 2.41 - 0.37
+            mine_open = (qty_num(Decimal(str(row_live_qty(cur)))
+                                 - Decimal(str(cur["cum_qty"] or 0)))
                          if cur["state"] in ("OPEN", "PARTIALLY_FILLED") else 0)
             plan = plan_sell(p, scale=ctl["scale"],
                              paper_open_qty=await paper_open_qty(conn, p["group_id"]),
@@ -2261,19 +2379,23 @@ class Mirror:
             return {"ok": False}
         if bal:
             self._buying_power = bal[0].get("buyingPower")
-        ours = {r["us_market_slug"]: int(Decimal(str(r["net"]))) for r in await conn.fetch(
+        # EXACT positions (rc6.3 pmus-sizing): a fractional holding (2.41) is
+        # compared as 2.41 -- truncating both sides to whole contracts hid a
+        # difference of less than one contract and misstated the position
+        ours = {r["us_market_slug"]: qty_num(Decimal(str(r["net"]))) for r in await conn.fetch(
             """SELECT us_market_slug,
                       sum(CASE WHEN intent LIKE 'ORDER_INTENT_BUY%' THEN qty ELSE -qty END) AS net
                  FROM execmirror_fills GROUP BY 1""")}
         venue_net = {}
         for slug, p in pos.items():
             try:
-                venue_net[slug] = abs(int(Decimal(str(p.get("netPosition") or 0))))
+                venue_net[slug] = abs(qty_num(Decimal(str(p.get("netPosition") or 0))))
             except Exception:                                 # noqa: BLE001
                 venue_net[slug] = None
         base = (ctl.get("baseline") or {})
         base = json.loads(base) if isinstance(base, str) else base
-        base_net = {k: int(v) for k, v in (base.get("positions_net") or {}).items()}
+        base_net = {k: qty_num(Decimal(str(v)))
+                    for k, v in (base.get("positions_net") or {}).items()}
         settled = {r["us_market_slug"] for r in await conn.fetch(
             "SELECT DISTINCT us_market_slug FROM paper_settlements")}
         expired = {s for s, p in pos.items() if p.get("expired")}
@@ -2438,7 +2560,8 @@ class Mirror:
         """ONE review of one actual position (record only)."""
         inv = await live_inventory(conn, h["group_id"])
         resting = await conn.fetchval(
-            """SELECT coalesce(sum(live_qty - cum_qty), 0) FROM execmirror_orders
+            """SELECT coalesce(sum(""" + LIVE_QTY_SQL + """ - cum_qty), 0)
+                 FROM execmirror_orders
                 WHERE group_id = $1 AND role = 'STANDING_PROTECTION'
                   AND state IN ('OPEN','PARTIALLY_FILLED')""", h["group_id"])
         filled_prot = await conn.fetchval(
@@ -2588,7 +2711,7 @@ class Mirror:
                                  "decision_id": i["decision_id"], "_sibling": True,
                                  "state": "EXCLUDED", "exclusion": i["actual_refusal"]
                                  or i["actual_state"], "venue_order_id": None,
-                                 "live_qty": i["live_qty"] or 0, "cum_qty": None,
+                                 "live_qty": row_live_qty(i), "cum_qty": None,
                                  "paper_qty": None, "scaled_qty": i["live_raw_qty"],
                                  "us_market_slug": i["us_market_slug"],
                                  "avg_px": None, "accepted_at": None,
@@ -2632,7 +2755,8 @@ class Mirror:
                         "paper_fill_qty": None if pf is None else str(pf["q"]),
                         "live_state": m["state"], "exclusion": m["exclusion"],
                         "venue_order_id": m["venue_order_id"],
-                        "live_intended_qty": m["live_qty"], "live_fill_qty": str(lf["q"]),
+                        "live_intended_qty": row_live_qty(m),
+                        "live_fill_qty": str(lf["q"]),
                         "venue_cum_qty": None if m["cum_qty"] is None else str(m["cum_qty"]),
                         "live_fees_usd": str(lf["fee"])}
                 if m.get("execution_intent_id"):
@@ -2649,7 +2773,7 @@ class Mirror:
                         "live_fees_usd": str(lf["fee"]),
                         "paper_qty_scaled": (None if m.get("scaled_qty") is None
                                              else str(m["scaled_qty"])),
-                        "live_qty": m["live_qty"],
+                        "live_qty": row_live_qty(m),
                         "decision_to_accept_ms": (
                             None if not (m.get("accepted_at") and m.get("paper_decided_at"))
                             else int((m["accepted_at"] - m["paper_decided_at"])
@@ -2682,10 +2806,13 @@ class Mirror:
                                  "venue": below.get("read_cum"),
                                  "fills": str(lf["q"]),
                                  "venue_state": below.get("venue_state")})
-                if Decimal(str(lf["q"])) > Decimal(m["live_qty"] or 0):
+                # the row's EXACT quantity (rc6.3 pmus-sizing: 2.41, not the
+                # integer column's rounded-up 3)
+                m_live = Decimal(str(row_live_qty(m)))
+                if Decimal(str(lf["q"])) > m_live:
                     disc.append({"code": "LIVE_FILLED_MORE_THAN_INTENDED", "mirror_id": m["mirror_id"]})
-                if m["paper_qty"] is not None and m["scaled_qty"] is not None and m["live_qty"]:
-                    if live_qty_rule_broken(m["live_qty"], m["scaled_qty"],
+                if m["paper_qty"] is not None and m["scaled_qty"] is not None and m_live:
+                    if live_qty_rule_broken(m_live, m["scaled_qty"],
                                             m.get("_live_sizing")):
                         disc.append({"code": "LIVE_QTY_NOT_THE_ROUNDED_SCALED_QTY",
                                      "mirror_id": m["mirror_id"]})

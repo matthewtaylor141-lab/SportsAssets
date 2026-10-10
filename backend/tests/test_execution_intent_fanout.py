@@ -274,7 +274,9 @@ async def test_a_below_minimum_live_quantity_refuses_actual_and_paper_proceeds(e
             ds[0]["decision_id"]))
         it = dict(await e.conn.fetchrow(
             "SELECT * FROM execution_intents WHERE decision_id = $1", ds[0]["decision_id"]))
-        assert it["actual_refusal"] == M.BELOW_VENUE_MINIMUM
+        # rc6.3 pmus-sizing: SHADOW reads no market, so 0.3 is below the
+        # lane's whole-contract unit -- never called a VENUE minimum
+        assert it["actual_refusal"] == M.R_BELOW_LANE_UNIT
         assert it["live_qty"] == 0 and float(it["live_raw_qty"]) < 0.5
         assert e.retail.placed == []                        # never enlarged
         assert await _paper_entries(e) == 1                 # PAPER proceeded

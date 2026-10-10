@@ -813,8 +813,10 @@ async def capacity_rates(conn, *, now, account_id=None,
            "strategies": strat}
     if await has(conn, "execmirror_orders"):
         a = await conn.fetchrow(
-            "SELECT count(*) AS n, sum(live_qty) AS q, sum(cum_qty) AS f "
-            "  FROM execmirror_orders WHERE live_qty > 0 "
+            "SELECT count(*) AS n, sum(coalesce(live_qty_exact, live_qty)) AS q,"
+            "       sum(cum_qty) AS f "
+            "  FROM execmirror_orders"
+            " WHERE coalesce(live_qty_exact, live_qty) > 0 "
             "   AND accepted_at IS NOT NULL "
             "   AND created_at >= to_timestamp($1)", cut)
         out["actual_fill_probability"] = CP.rate(
