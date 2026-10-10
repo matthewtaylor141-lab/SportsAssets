@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
+from . import audrey_reconciliation_status as ARS
 from . import execmirror_probe as EP
 from .db import advisory_held, lease_session
 from . import loop_health as _LH
@@ -273,9 +274,14 @@ R_CANCEL_RESEND_EXHAUSTED = "CANCEL_RESEND_EXHAUSTED"
 ACCOUNT_SNAPSHOT_MAX_AGE_S = 180.0
 #: Audrey's status for a group she would otherwise call MATCHED or
 #: NOT_MIRRORED while the newest account snapshot is missing or older than
-#: ACCOUNT_SNAPSHOT_MAX_AGE_S: the venue side is not currently evidenced
-AUDREY_STALE = "STALE"
-R_AUDREY_SNAPSHOT_NOT_CURRENT = "AUDREY_ACCOUNT_SNAPSHOT_NOT_CURRENT"
+#: ACCOUNT_SNAPSHOT_MAX_AGE_S: the venue side is not currently evidenced.
+#: It is READ as STALE everywhere; the table stores it as status PENDING plus
+#: smalllive_reconciliations.stale_reason (migration 366 adds only that
+#: nullable column -- the status CHECK of an existing table is not touched,
+#: so the previous release stays provably compatible): see
+#: audrey_reconciliation_status for the representation and why PENDING.
+AUDREY_STALE = ARS.STALE
+R_AUDREY_SNAPSHOT_NOT_CURRENT = ARS.R_SNAPSHOT_NOT_CURRENT
 
 # ── A STOP IS DONE ONLY WHEN IT IS DONE (rc6.2 pmus-exec, audit item 5) ────
 #: rows that can still be (or become) a working venue order: while any
@@ -1470,16 +1476,49 @@ async def resolved_markets(conn, last_fill_at: dict) -> dict:
     return out
 
 
-def aggregate_cap_usd(ctl: dict) -> tuple[Decimal, str]:
-    """(cap, basis) for the account's open + held ACTUAL notional:
-    execmirror_control.max_open_notional_usd (migration 366) when set; when it
-    is NULL (its default) or absent, FAIL-CLOSED SMALL -- the per-order cap
-    max_order_usd, so at most one order's worth is ever open or held."""
-    v = ctl.get("max_open_notional_usd")
-    if v is not None:
-        return Decimal(str(v)), "execmirror_control.max_open_notional_usd"
-    return (Decimal(str(ctl.get("max_order_usd") or 0)),
-            "DEFAULT_EQUALS_max_order_usd (max_open_notional_usd is NULL)")
+#: the ACTUAL lane's account: its credential namespace
+#: (PMUS_EXECMIRROR_KEY_ID / PMUS_EXECMIRROR_SECRET_KEY), and the key of its
+#: row in execmirror_exposure_caps
+ACTUAL_ACCOUNT_ID = "PMUS_EXECMIRROR"
+EXPOSURE_CAPS_TABLE = "execmirror_exposure_caps"
+CAP_BASIS_CONFIGURED = "execmirror_exposure_caps.max_open_notional_usd"
+CAP_BASIS_DEFAULT = ("DEFAULT_EQUALS_max_order_usd (no row in "
+                     "execmirror_exposure_caps for the account)")
+
+
+def aggregate_cap_usd(max_order_usd, configured) -> tuple[Decimal, str]:
+    """(cap, basis) for the account's open + held ACTUAL notional. The
+    account's row in execmirror_exposure_caps (migration 366) when there is
+    one -- the database guarantees it is positive, and a value that were not
+    would not be believed here either; with NO row, FAIL-CLOSED SMALL: the
+    per-order cap max_order_usd, so at most one order's worth is ever open or
+    held. Pure."""
+    if configured is not None and Decimal(str(configured)) > 0:
+        return Decimal(str(configured)), CAP_BASIS_CONFIGURED
+    return Decimal(str(max_order_usd or 0)), CAP_BASIS_DEFAULT
+
+
+async def aggregate_cap(conn) -> tuple[Decimal, str]:
+    """The cap in force for the ACTUAL account, read from the database: the
+    control row LEFT JOINed to the account's row in execmirror_exposure_caps.
+    A new table is never a reason to fail open or to fail the claim: where it
+    does not exist (a schema rolled back to before 366, or not yet migrated)
+    the answer is the fail-closed default, max_order_usd. Reads only; the
+    kill switch's own reader (`control`) never touches the table."""
+    if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL",
+                           EXPOSURE_CAPS_TABLE):
+        r = await conn.fetchrow(
+            """SELECT c.max_order_usd, k.max_open_notional_usd
+                 FROM execmirror_control c
+                 LEFT JOIN execmirror_exposure_caps k ON k.account_id = $1
+                WHERE c.id = 1""", ACTUAL_ACCOUNT_ID)
+    else:
+        r = await conn.fetchrow(
+            "SELECT max_order_usd, NULL::numeric AS max_open_notional_usd "
+            "  FROM execmirror_control WHERE id = 1")
+    if r is None:
+        return aggregate_cap_usd(0, None)
+    return aggregate_cap_usd(r["max_order_usd"], r["max_open_notional_usd"])
 
 
 async def live_entry_qty(conn, group_id) -> Decimal:
@@ -3093,18 +3132,31 @@ class Mirror:
                                  "live_held": str(held),
                                  "basis": "execmirror_fills (venue fills)",
                                  "execution_environment": "VENUE_CONFIRMED"}}}
+            # THE STATUS AS THE TABLE STORES IT (migration 366): STALE is
+            # status PENDING + stale_reason, written in this one statement,
+            # because the status CHECK of an existing table is not widened;
+            # every reader projects it back (audrey_reconciliation_status).
+            # `prev` is the status as it was READ, so a change between STALE
+            # and a real PENDING is a change (changed_at, and the event).
+            stored_status, stale_reason = ARS.stored(
+                status, None if stale is None else stale["code"])
             prev = await conn.fetchval(
-                "SELECT status FROM smalllive_reconciliations WHERE group_id = $1", gid)
+                "SELECT " + ARS.effective_sql() + " FROM smalllive_reconciliations "
+                " WHERE group_id = $1", gid)
             await conn.execute(
-                """INSERT INTO smalllive_reconciliations (group_id, venue, status, discrepancies, chain)
-                   VALUES ($1,$2,$3,$4::jsonb,$5::jsonb)
+                """INSERT INTO smalllive_reconciliations
+                     (group_id, venue, status, stale_reason, discrepancies, chain)
+                   VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)
                    ON CONFLICT (group_id) DO UPDATE SET status = EXCLUDED.status,
+                     stale_reason = EXCLUDED.stale_reason,
                      discrepancies = EXCLUDED.discrepancies, chain = EXCLUDED.chain,
                      reconciled_at = now(),
                      changed_at = CASE WHEN smalllive_reconciliations.status
                                        IS DISTINCT FROM EXCLUDED.status
+                                       OR smalllive_reconciliations.stale_reason
+                                       IS DISTINCT FROM EXCLUDED.stale_reason
                                        THEN now() ELSE smalllive_reconciliations.changed_at END""",
-                gid, VENUE, status, _j(disc), _j(chain_doc))
+                gid, VENUE, stored_status, stale_reason, _j(disc), _j(chain_doc))
             if prev != status:
                 await _event(conn, "AUDREY_RECONCILIATION_" + status, group_id=gid,
                              discrepancies=disc)

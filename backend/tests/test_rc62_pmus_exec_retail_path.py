@@ -14,17 +14,20 @@ asserts the FIXED behaviour and fails on the base (rc6/int-62 @ 14170049):
       the SELL is refused exactly as before (probe A1 inverted);
   §2  duplicate exposure: one market, one exposure (a per-market transaction
       lock in the claim; a non-terminal order or held contracts refuse by
-      name), and the account's open + held notional within
-      execmirror_control's aggregate cap (NULL -> max_order_usd, fail closed
-      small), read under an account-wide lock taken after the market's so
-      two markets' claims at once never pass it on one reading (probe A7
-      inverted; review: two dispatches on two markets);
+      name), and the account's open + held notional within its aggregate cap
+      (its row in execmirror_exposure_caps, migration 366: no row ->
+      max_order_usd, fail closed small; the database guarantees a configured
+      cap is positive), read under an account-wide lock taken after the
+      market's so two markets' claims at once never pass it on one reading
+      (probe A7 inverted; review: two dispatches on two markets);
   §3  cancellation: a cancel the venue did not accept is never recorded as
       requested-and-accepted, and a CANCEL_REQUESTED order still working at
       the venue is re-sent with bounded attempts and back-off, each an event
       (probe A4 inverted);
   §4  reconciliation: signed net positions; Audrey never calls a group
-      MATCHED / NOT_MIRRORED from a snapshot older than 180 s (STALE); the
+      MATCHED / NOT_MIRRORED from a snapshot older than 180 s (STALE: stored
+      as status PENDING + smalllive_reconciliations.stale_reason, read as
+      STALE -- migration 366 widens no existing table's constraint); the
       ACTUAL lane refuses while the newest snapshot is unreconciled (probe A6
       inverted). The read-only snapshot while STOPPED stays an OWNER decision
       (redteam/controls.OWNER_SNAPSHOT_WHILE_STOPPED) -- pinned unchanged;
@@ -68,6 +71,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from sportsassets import audrey_reconciliation_status as ARS
 from sportsassets import execmirror as M
 from sportsassets import execmirror_probe as EP
 from sportsassets import execution_intent as EI
@@ -107,7 +111,8 @@ async def _restore_control():
         await conn.execute("TRUNCATE smalllive_reviews, smalllive_handoffs, "
                            "smalllive_reconciliations")
         await conn.execute("TRUNCATE execmirror_fills, execmirror_events, "
-                           "execmirror_snapshots, execmirror_orders")
+                           "execmirror_snapshots, execmirror_orders, "
+                           "execmirror_exposure_caps")
     finally:
         await conn.close()
 
@@ -220,6 +225,14 @@ async def _events(conn, kind, mirror_id=None) -> list:
 
 def _j(v):
     return json.loads(v) if isinstance(v, str) else (v or {})
+
+
+async def _read_status(conn, group_id) -> str:
+    """Audrey's status for a group as every reader of this release reads it
+    (PENDING + stale_reason is STALE: audrey_reconciliation_status)."""
+    return await conn.fetchval(
+        "SELECT " + ARS.effective_sql() + " FROM smalllive_reconciliations"
+        " WHERE group_id = $1", group_id)
 
 
 async def _held_position(conn, monkeypatch, *, qty=2000, fill=2):
@@ -532,14 +545,17 @@ async def test_two_lanes_racing_on_one_market_make_one_claim(monkeypatch):
 
 @pg
 async def test_the_aggregate_cap_counts_open_and_held_notional(monkeypatch):
-    """max_open_notional_usd 2.00 (migration 366), per-order cap 25: the
-    first order (3 @ 0.55 = $1.65, resting) is within it; a second on
-    ANOTHER market ($1.65 more) is refused by name, nothing sent."""
+    """The account's row in execmirror_exposure_caps (migration 366) says
+    2.00, per-order cap 25: the first order (3 @ 0.55 = $1.65, resting) is
+    within it; a second on ANOTHER market ($1.65 more) is refused by name,
+    nothing sent."""
     conn = await TE._conn()
     try:
         acct, venue, mirror = await TE._setup(conn, monkeypatch)
-        await conn.execute("UPDATE execmirror_control SET max_open_notional_usd = 2.00"
-                           " WHERE id = 1")
+        await conn.execute(
+            "INSERT INTO execmirror_exposure_caps (account_id, "
+            "max_open_notional_usd, actor) VALUES ($1, 2.00, 'owner-test')",
+            M.ACTUAL_ACCOUNT_ID)
         a = await TE._paper_order(conn, acct, qty=3000, tif="GTD", otype="RESTING")
         b = await TE._paper_order(conn, acct, qty=3000)
         assert a["slug"] != b["slug"]
@@ -551,7 +567,7 @@ async def test_the_aggregate_cap_counts_open_and_held_notional(monkeypatch):
         assert (Decimal(rb["open_usd"]), Decimal(rb["held_usd"]),
                 Decimal(rb["order_cost_usd"]), Decimal(rb["cap_usd"])) == (
             Decimal("1.65"), Decimal(0), Decimal("1.65"), Decimal("2.00"))
-        assert rb["cap_basis"] == "execmirror_control.max_open_notional_usd"
+        assert rb["cap_basis"] == "execmirror_exposure_caps.max_open_notional_usd"
         assert len(venue.placed) == 1
     finally:
         await conn.close()
@@ -559,13 +575,15 @@ async def test_the_aggregate_cap_counts_open_and_held_notional(monkeypatch):
 
 @pg
 async def test_with_no_aggregate_cap_set_the_cap_is_the_per_order_cap(monkeypatch):
-    """max_open_notional_usd NULL (its default): fail-closed small, equal to
-    max_order_usd. A filled $1.10 holding plus a second $1.10 order on
-    another market is $2.20 > $2.00: refused. Base: both sent."""
+    """No row for the account in execmirror_exposure_caps (the default):
+    fail-closed small, equal to max_order_usd. A filled $1.10 holding plus a
+    second $1.10 order on another market is $2.20 > $2.00: refused. Base:
+    both sent."""
     conn = await TE._conn()
     try:
         acct, venue, mirror = await TE._setup(conn, monkeypatch, cap=2)
-        assert (await M.control(conn))["max_open_notional_usd"] is None
+        assert await conn.fetchval(
+            "SELECT count(*) FROM execmirror_exposure_caps") == 0
         a = await TE._paper_order(conn, acct, qty=2000)
         b = await TE._paper_order(conn, acct, qty=2000)
         await mirror.snapshot(conn, await M.control(conn))
@@ -600,7 +618,8 @@ async def test_two_dispatches_on_two_markets_at_once_never_exceed_the_aggregate_
     pool = await asyncpg.create_pool(TE.DSN, min_size=2, max_size=4)
     try:
         acct, venue, mirror = await TE._setup(conn, monkeypatch, cap=2)
-        assert (await M.control(conn))["max_open_notional_usd"] is None
+        assert await conn.fetchval(
+            "SELECT count(*) FROM execmirror_exposure_caps") == 0
         a = await TE._paper_order(conn, acct, qty=2000, tif="GTD", otype="RESTING")
         b = await TE._paper_order(conn, acct, qty=2000, tif="GTD", otype="RESTING")
         assert a["slug"] != b["slug"]
@@ -859,7 +878,11 @@ async def test_audrey_never_reconciles_from_a_snapshot_older_than_its_bound(
         await mirror.audrey_reconcile(conn)
         rec = await conn.fetchrow("SELECT * FROM smalllive_reconciliations"
                                   " WHERE group_id = $1", po["group_id"])
-        assert rec["status"] == "STALE", rec
+        # STORED as PENDING + the reason (migration 366: the status CHECK of
+        # the existing table is not widened), READ as STALE
+        assert (rec["status"], rec["stale_reason"]) == (
+            "PENDING", "AUDREY_ACCOUNT_SNAPSHOT_NOT_CURRENT"), rec
+        assert await _read_status(conn, po["group_id"]) == "STALE"
         chain = _j(rec["chain"])
         assert chain["stale"]["would_be"] == "NOT_MIRRORED"
         assert chain["stale"]["code"] == "AUDREY_ACCOUNT_SNAPSHOT_NOT_CURRENT"
@@ -869,7 +892,8 @@ async def test_audrey_never_reconciles_from_a_snapshot_older_than_its_bound(
         await mirror.audrey_reconcile(conn)
         rec = await conn.fetchrow("SELECT * FROM smalllive_reconciliations"
                                   " WHERE group_id = $1", po["group_id"])
-        assert rec["status"] == "NOT_MIRRORED"
+        assert rec["status"] == "NOT_MIRRORED" and rec["stale_reason"] is None
+        assert await _read_status(conn, po["group_id"]) == "NOT_MIRRORED"
         assert _j(rec["chain"])["stale"] is None
     finally:
         await conn.close()
@@ -897,7 +921,9 @@ async def test_audrey_never_calls_a_live_chain_matched_without_a_current_snapsho
         rec = await conn.fetchrow("SELECT * FROM smalllive_reconciliations"
                                   " WHERE group_id = $1", po["group_id"])
         assert _j(rec["discrepancies"]) == []
-        assert rec["status"] == "STALE", rec
+        assert (rec["status"], rec["stale_reason"]) == (
+            "PENDING", "AUDREY_ACCOUNT_SNAPSHOT_NOT_CURRENT"), rec
+        assert await _read_status(conn, po["group_id"]) == "STALE"
         assert _j(rec["chain"])["stale"]["would_be"] == "MATCHED"
     finally:
         await conn.close()

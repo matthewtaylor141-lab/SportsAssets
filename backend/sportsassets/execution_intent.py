@@ -46,9 +46,10 @@ the newest account snapshot must not name a venue position that disagrees
 with our venue fills (R_VENUE_POSITION_DISAGREES, step 4a); the claim
 (step 5) serializes per market (a transaction advisory lock), refuses a
 second exposure on one market (a non-terminal order or held contracts) and
-the account's open + held notional above execmirror_control's aggregate cap
-(read under an account-wide lock taken after the market's, so two markets'
-claims never pass the cap on one reading), and is written only while the
+the account's open + held notional above its aggregate cap (its row in
+execmirror_exposure_caps; no row = max_order_usd) (read under an account-wide
+lock taken after the market's, so two markets' claims never pass the cap on
+one reading), and is written only while the
 control is enabled and not stopped (in the INSERT itself); the control is
 re-read immediately before the send (5b).
 
@@ -135,7 +136,7 @@ R_VENUE_POSITION_DISAGREES = "VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS"
 R_MARKET_HAS_OPEN_ORDER = "ACTUAL_MARKET_HAS_A_NON_TERMINAL_ORDER"
 R_MARKET_ALREADY_HELD = "ACTUAL_MARKET_ALREADY_HELD"
 #: item 2 -- the account's open + held actual notional plus this order's cost
-#: above execmirror_control's aggregate cap (execmirror.aggregate_cap_usd)
+#: above the account's aggregate cap (execmirror.aggregate_cap)
 R_AGGREGATE_ABOVE_CAP = "ACTUAL_OPEN_AND_HELD_NOTIONAL_ABOVE_CAP"
 #: the claim's per-market lock: pg_advisory_xact_lock(SLUG_LOCK_CLASS,
 #: hashtext(slug)) -- the two-key form, a key space that never overlaps the
@@ -466,11 +467,12 @@ class ActualLane:
         #   * one exposure per market: a non-terminal actual order on it (any
         #     lane, any role) or contracts already held there refuses by name;
         #   * the account's aggregate cap: open + held actual notional plus
-        #     this order's cost within execmirror_control's aggregate cap
-        #     (execmirror.aggregate_cap_usd; NULL -> max_order_usd, fail
-        #     closed small) -- read and claimed under the ACCOUNT-WIDE lock
-        #     (ACCOUNT_LOCK_CLASS, after the market's), so claims on two
-        #     markets at once never both pass the cap on the same reading;
+        #     this order's cost within the account's row of
+        #     execmirror_exposure_caps (execmirror.aggregate_cap; no row ->
+        #     max_order_usd, fail closed small) -- read and claimed under the
+        #     ACCOUNT-WIDE lock (ACCOUNT_LOCK_CLASS, after the market's), so
+        #     claims on two markets at once never both pass the cap on the
+        #     same reading;
         #   * the kill switch IN THE INSERT ITSELF: the row is written only if
         #     execmirror_control is enabled and not stopped at that instant,
         #     the control row share-locked so a stop either commits first (no
@@ -501,7 +503,7 @@ class ActualLane:
                 # read to the commit of its INSERT (market lock first)
                 await conn.execute("SELECT pg_advisory_xact_lock($1, 0)",
                                    ACCOUNT_LOCK_CLASS)
-                cap, basis = M.aggregate_cap_usd(await M.control(conn))
+                cap, basis = await M.aggregate_cap(conn)
                 nt = await M.open_and_held_notional(conn)
                 total = nt["open_usd"] + nt["held_usd"] + cost
                 if total > cap:

@@ -28,6 +28,7 @@ import time
 
 import pytest
 
+from sportsassets import audrey_reconciliation_status as ARS
 from sportsassets import execmirror as M
 from sportsassets.redteam import controls as C
 
@@ -87,7 +88,12 @@ async def test_audrey_reconciles_while_the_lane_is_stopped_or_off(
         # rc6.2 pmus-exec (audit item 4): with no CURRENT account snapshot
         # (none while the lane is off) she never calls it NOT_MIRRORED: STALE,
         # with what she would have said kept on the chain
-        assert rec is not None and rec["status"] == M.AUDREY_STALE, rec
+        # (migration 366 stores it as PENDING + stale_reason and every reader
+        # projects it back: the status as READ is STALE)
+        assert rec is not None and ARS.effective_row(
+            dict(rec))["status"] == M.AUDREY_STALE, rec
+        assert (rec["status"], rec["stale_reason"]) == (
+            "PENDING", M.R_AUDREY_SNAPSHOT_NOT_CURRENT), rec
         chain = json.loads(rec["chain"]) if isinstance(rec["chain"], str) \
             else rec["chain"]
         assert chain["stale"]["would_be"] == "NOT_MIRRORED"

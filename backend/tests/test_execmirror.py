@@ -307,7 +307,8 @@ async def _setup(conn, monkeypatch, *, cap=25, ago_s=5):
     await conn.execute("TRUNCATE smalllive_reviews, smalllive_handoffs, "
                        "smalllive_reconciliations")
     await conn.execute("TRUNCATE execmirror_fills, execmirror_events, "
-                       "execmirror_snapshots, execmirror_orders")
+                       "execmirror_snapshots, execmirror_orders, "
+                       "execmirror_exposure_caps")
     await conn.execute(
         """UPDATE execmirror_control SET enabled = true, stopped = false,
              stop_done_at = NULL, flatten_on_stop = false,

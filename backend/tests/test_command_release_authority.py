@@ -306,8 +306,10 @@ EXPECTED_ABSENT_216_316 = EXPECTED_ABSENT_216_315
 #: change stamp); 317..364 are the numbers parallel RC6 lanes hold, absent
 #: from this build
 EXPECTED_ABSENT_216_365 = EXPECTED_ABSENT_216_316 + list(range(317, 365))
-#: (RC6.2 PMUS-EXEC) 216..366: 366 present (the ACTUAL lane's aggregate
-#: exposure cap column and Audrey's STALE status), nothing new absent
+#: (RC6.2 PMUS-EXEC) 216..366: 366 present (a new table for the ACTUAL
+#: lane's aggregate exposure cap and one nullable column that, with status
+#: PENDING, is Audrey's STALE; nothing existing constrained or changed),
+#: nothing new absent
 EXPECTED_ABSENT_216_366 = EXPECTED_ABSENT_216_365
 
 

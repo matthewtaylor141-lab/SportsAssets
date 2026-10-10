@@ -1,18 +1,22 @@
 -- 366 rollback: the ACTUAL lane's aggregate exposure cap and Audrey's STALE.
 --
--- The column is dropped: a release without it reads no aggregate cap (the
--- code before 366 had none; this release's code reads a missing column as
--- NULL -> max_order_usd, fail closed). Audrey's status CHECK goes back to its
--- 198 set, added NOT VALID so the STALE rows already written are kept as the
--- record they are (the previous release rewrites each group's status on its
--- next pass). Safe to apply twice.
-ALTER TABLE execmirror_control
-    DROP CONSTRAINT IF EXISTS execmirror_control_open_notional_ck;
-ALTER TABLE execmirror_control
-    DROP COLUMN IF EXISTS max_open_notional_usd;
+-- Both objects 366 added are removed, and nothing else was changed by 366,
+-- so nothing else is restored:
+--   * execmirror_exposure_caps is dropped. A release without it reads no
+--     aggregate cap (the code before 366 had none; this release's code reads
+--     a missing table as no row -> max_order_usd, fail closed). A cap an
+--     owner configured is lost with the table: record it before rolling back
+--     if it is to be set again.
+--   * smalllive_reconciliations.stale_reason is dropped. The groups Audrey
+--     recorded as STALE (stored PENDING + the reason) remain as PENDING rows,
+--     the one existing "not final" status; the previous release rewrites
+--     each group's status on its next pass. The status CHECK was never
+--     touched, so there is no constraint to put back.
+-- Apply it together with (or after) rolling the CODE back to the previous
+-- release: the current release's Audrey and readers name stale_reason, so
+-- they must not run on the schema this leaves. (The cap reader alone
+-- tolerates a missing table, as above.)
+-- Safe to apply twice; 366 can be applied again afterwards.
+DROP TABLE IF EXISTS execmirror_exposure_caps;
 ALTER TABLE smalllive_reconciliations
-    DROP CONSTRAINT IF EXISTS smalllive_reconciliations_status_check;
-ALTER TABLE smalllive_reconciliations
-    ADD CONSTRAINT smalllive_reconciliations_status_check
-    CHECK (status IN ('MATCHED', 'DISCREPANCY', 'PENDING', 'NOT_MIRRORED'))
-    NOT VALID;
+    DROP COLUMN IF EXISTS stale_reason;

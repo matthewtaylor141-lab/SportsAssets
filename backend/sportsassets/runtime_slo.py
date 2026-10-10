@@ -43,6 +43,8 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
+from . import audrey_reconciliation_status as ARS
+
 VERSION = "RUNTIME_SLO_V1"
 OK, BREACH, UNAVAILABLE = "OK", "BREACH", "UNAVAILABLE"
 STATEMENT_TIMEOUT_MS = 4000
@@ -641,7 +643,8 @@ async def read_slos(conn, *, now: float | None = None, api=None,
     # 5 · reconciliation age
     async def recon():
         rows = await conn.fetch(
-            "SELECT h.group_id, r.reconciled_at, r.status "
+            "SELECT h.group_id, r.reconciled_at, "
+            + ARS.effective_sql("r") + " AS status "
             "  FROM smalllive_handoffs h "
             "  LEFT JOIN smalllive_reconciliations r ON r.group_id = h.group_id "
             " WHERE h.state = 'OPEN'")

@@ -41,6 +41,7 @@ from decimal import Decimal
 
 import pytest
 
+from sportsassets import audrey_reconciliation_status as ARS
 from sportsassets import execmirror as M
 from sportsassets.red_team.models import PositionTruth
 from sportsassets.redteam import controls as C
@@ -250,7 +251,9 @@ async def test_a_paper_only_reconciliation_names_its_paper_position(
         # rc6.2 pmus-exec (audit item 4): no current account snapshot (the
         # lane is off) -> STALE, never NOT_MIRRORED; the chain still names
         # the paper position and the verdict she would have given
-        assert rec["status"] == M.AUDREY_STALE
+        assert ARS.effective_row(dict(rec))["status"] == M.AUDREY_STALE
+        assert (rec["status"], rec["stale_reason"]) == (
+            "PENDING", M.R_AUDREY_SNAPSHOT_NOT_CURRENT)
         chain = json.loads(rec["chain"]) if isinstance(rec["chain"], str) \
             else rec["chain"]
         assert chain["stale"]["would_be"] == "NOT_MIRRORED"
