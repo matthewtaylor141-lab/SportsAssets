@@ -156,6 +156,49 @@ def _dumps(v) -> str:
     return json.dumps(v, default=str, sort_keys=True)
 
 
+# rc6.3 pmus-sizing: an ACTUAL position may hold a FRACTIONAL quantity (an
+# ACTUAL BUY sent at a 0.01-step market's own step, e.g. 2.41 or 0.83).
+# Management reads it EXACTLY: the int() this module applied to `held` read
+# 0.83 as 0 (open_qty 0, HOLD $0.00, EXIT / REDUCE NOTHING_TO_SELL, no
+# liquidation or mark) and 2.41 as 2 (EXIT 2, liquidation and mark short).
+
+def held_qty(held) -> Decimal:
+    """The held quantity exactly, as a Decimal (never truncated); None or
+    a negative is 0. Pure."""
+    d = Decimal(str(held if held is not None else 0))
+    if not d.is_finite():
+        raise ValueError("HELD_QUANTITY_NOT_FINITE: %s" % held)
+    return max(d, Decimal(0))
+
+
+def held_step(held) -> Decimal:
+    """THE STEP a management size of this inventory is floored to, as
+    execmirror.plan_sell sizes the sale it would send: one whole contract
+    when the held quantity is whole, the documented 0.01 contract when it
+    is fractional. Pure but for reading execmirror's two constants."""
+    from .. import execmirror as EM
+    d = held_qty(held)
+    return (EM.WHOLE_QTY_STEP if d == d.to_integral_value()
+            else EM.FRACTIONAL_QTY_STEP)
+
+
+def floor_to_step(q, step: Decimal) -> Decimal:
+    """`q` rounded DOWN to a multiple of `step` (never up: a management size
+    is never larger than what is held). Pure."""
+    from decimal import ROUND_FLOOR
+    d = Decimal(str(q))
+    return (d / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+
+def qty_json(q):
+    """A quantity as recorded: an int when whole (every whole position's
+    record is exactly as before), else the exact value as a float. Pure."""
+    if q is None:
+        return None
+    d = Decimal(str(q))
+    return int(d) if d == d.to_integral_value() else float(d)
+
+
 def _sha(v) -> str:
     return hashlib.sha256(_dumps(v).encode()).hexdigest()
 
@@ -568,28 +611,38 @@ def paper_alternatives(alts: dict, *, reallocate: dict,
     return XF.complete_alternatives(out, evidence_state=evidence_state)
 
 
-def actual_alternatives(*, evidence: dict, held: int, exit_px,
+def actual_alternatives(*, evidence: dict, held, exit_px,
                         fee_fn, at: float, reallocate: dict) -> dict:
     """HOLD / EXIT / REDUCE for an ACTUAL position on the venue's top of
     book (size not shown by the BBO: stated). Pure but for the fee
-    function. Returns {"alternatives", "recommendation"}."""
+    function. Returns {"alternatives", "recommendation"}.
+
+    `held` is the EXACT inventory (an int, or a Decimal such as 2.41 on a
+    0.01-step market; rc6.3 pmus-sizing). HOLD is held x p; EXIT sells the
+    whole inventory and REDUCE half of it, each rounded DOWN to the
+    inventory's step (held_step: 1 when whole, 0.01 when fractional, as
+    execmirror.plan_sell sizes the sale), and NOTHING_TO_SELL is raised
+    only when that size is below the step. A whole inventory is valued and
+    sized exactly as before (EXIT q, REDUCE q // 2)."""
     from .. import bettor_paper_ledger as L
     fresh = evidence.get("evidence_state") == E_FRESH
     p = evidence.get("probability")
-    q = int(held or 0)
+    q = held_qty(held)
+    step = held_step(q)
     alts = []
     vals = {}
     if p is None:
         alts.append({"action": A_HOLD, "rankable": False, "value_usd": None,
                      "blocker": "NO_SETTLEMENT_MEASURE_FOR_THIS_POSITION"})
     else:
-        v = round(q * float(p), 6)
+        v = round(float(q) * float(p), 6)
         alts.append({"action": A_HOLD, "rankable": True, "value_usd": v,
                      "ev_basis": evidence.get("evidence_state"),
                      "ev_is_current": fresh, "blocker": None})
         vals[A_HOLD] = v
-    for act, sell in ((A_EXIT, q), (A_REDUCE, q // 2)):
-        if sell < 1:
+    for act, sell in ((A_EXIT, floor_to_step(q, step)),
+                      (A_REDUCE, floor_to_step(q / 2, step))):
+        if sell < step:
             alts.append({"action": act, "rankable": False, "value_usd": None,
                          "blocker": "NOTHING_TO_SELL"})
             continue
@@ -598,14 +651,14 @@ def actual_alternatives(*, evidence: dict, held: int, exit_px,
                          "blocker": "NO_EXECUTABLE_EXIT_PRICE_IN_THE_VENUE_BBO"})
             continue
         fee = float(L._fee(fee_fn, sell, float(exit_px), at))
-        cash = sell * float(exit_px) - fee
-        kept = q - sell
+        cash = float(sell) * float(exit_px) - fee
+        kept = float(q - sell)
         if p is None and kept > 0:
             alts.append({"action": act, "rankable": False, "value_usd": None,
                          "blocker": "NO_SETTLEMENT_MEASURE_FOR_THIS_POSITION"})
             continue
         v = round(cash + kept * float(p or 0.0), 6)
-        c = {"action": act, "qty": sell, "value_usd": v,
+        c = {"action": act, "qty": qty_json(sell), "value_usd": v,
              "fees_usd": round(fee, 6),
              "evidence_quality": "VENUE_TOP_OF_BOOK_SIZE_NOT_SHOWN"}
         if not fresh:
@@ -1232,13 +1285,15 @@ async def _record_actual_thesis(conn, h, *, at, quote, fee_fn) -> dict:
 
 async def actual_review_hook(conn, h: dict, *, review_id: str, at: float,
                              trigger: str, due_at, cadence_s: float,
-                             quote: dict, prob: dict, held: int,
+                             quote: dict, prob: dict, held,
                              paper_recommendation=None, policy: dict,
                              fee_fn=None) -> dict:
     """THE ASSESSMENT OF ONE ACTUAL REVIEW (handed to execmirror.Mirror as
     `management_assessor`). Record only: the actual position's action still
     follows the paper decision; nothing here places or cancels anything.
-    Never raises."""
+    `held` is execmirror.live_inventory's EXACT held quantity (an int when
+    whole, else a Decimal such as 0.83): it is never truncated. Never
+    raises."""
     try:
         return await _actual_review_hook(
             conn, h, review_id=review_id, at=at, trigger=trigger,
@@ -1269,12 +1324,16 @@ async def _actual_review_hook(conn, h, *, review_id, at, trigger, due_at,
     from .. import bettor_paper_ledger as L
     lc = live_cash(await _live_fills(conn, h["group_id"],
                                      h["us_market_slug"]))
-    n = int(held or 0)
+    # EXACT held (rc6.3 pmus-sizing): 0.83 is 0.83 and 2.41 is 2.41, never
+    # int()-truncated to 0 / 2 -- liquidation, the per-contract net, the
+    # marks, the alternatives and REALLOCATE all read the same quantity
+    n = held_qty(held)
     liq = None
     if exit_px is not None and n > 0:
-        liq = round(n * exit_px - float(L._fee(fee_fn, n, exit_px, at)), 6)
-    per_net = None if liq is None or n <= 0 else liq / n
-    marks = {"open_qty": n, "cash_to_date_usd": lc["cash_usd"],
+        liq = round(float(n) * exit_px
+                    - float(L._fee(fee_fn, n, exit_px, at)), 6)
+    per_net = None if liq is None or n <= 0 else liq / float(n)
+    marks = {"open_qty": qty_json(n), "cash_to_date_usd": lc["cash_usd"],
              "exit_net_per_contract": _f(per_net),
              "actual_mark_pnl_usd": (None if liq is None else round(
                  lc["cash_usd"] + liq, 6)),

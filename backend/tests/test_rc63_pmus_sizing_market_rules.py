@@ -33,6 +33,11 @@ THE RULE NOW (execmirror.MARKET_RULES_VERSION; execution_intent steps 2b-4c):
       and an off-tick price refuse by name with nothing placed; the per-order
       cap and the buying power still bind; a slow market read can never send
       on a book or decision older than its bound;
+  §4b Xavier's ACTUAL management (xavier_management.actual_review_hook, the
+      assessor execmirror is wired with) reads the EXACT held quantity: a
+      0.83 / 2.41 position is assessed at 0.83 / 2.41 (open_qty, EXIT,
+      liquidation, marks; REDUCE floored to the inventory's 0.01 step) and
+      the Command Center position room shows it; a whole position as before;
   §5  THE WIRE (the real execmirror.Venue on the pinned SDK over
       httpx.MockTransport): in SHADOW (as shipped) NOTHING reaches the wire
       and every intent -- 0.833 contracts included -- is refused by its true
@@ -894,6 +899,180 @@ async def test_a_slow_market_read_never_sends_on_a_stale_book_or_decision(
         assert venue.placed == [] and venue.market_reads == [po["slug"]]
         assert await conn.fetchval("SELECT count(*) FROM execmirror_orders") == 0
     finally:
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §4b XAVIER'S ACTUAL MANAGEMENT READS THE EXACT INVENTORY (review r2)
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE REVIEW'S BLOCKING FINDING (rc6.3 pmus-sizing r2, reproduced on 99b590b0):
+# the lane makes FRACTIONAL ACTUAL positions the normal case on 0.01-step
+# markets, but the management assessor execmirror is wired with
+# (api/app.py: management_assessor=_XM.actual_review_hook) int()-truncated the
+# held quantity: a 0.83 position recorded open_qty 0, HOLD $0.00 and EXIT /
+# REDUCE NOTHING_TO_SELL with no liquidation or mark; a 2.41 position recorded
+# open_qty 2, EXIT 2 and a liquidation of $0.77 for 2 contracts. The Command
+# Center position room shows these rows. Now the exact quantity is read
+# throughout; a whole position (3) is recorded exactly as before.
+
+def test_actual_alternatives_size_and_value_the_exact_inventory():
+    """Pure: HOLD is held x p; EXIT the whole inventory and REDUCE half of
+    it, each floored to the inventory's step (0.01 fractional, 1 whole --
+    as plan_sell), fees charged on that exact size; NOTHING_TO_SELL only
+    below the step. Whole inventory is valued and sized exactly as before
+    (EXIT 4 / REDUCE 2 ints, the existing loop tests' numbers)."""
+    from sportsassets.agents import xavier_management as XM
+    calls = []
+
+    def fee(q, px, *, at=None):
+        calls.append(q)
+        return 0.01 * q
+
+    re_ = {"recommended": False, "blocker": XM.B_STALE}
+    ev = {"evidence_state": XM.E_FRESH, "probability": 0.5}
+
+    def alts(held):
+        calls.clear()
+        got = XM.actual_alternatives(evidence=ev, held=held, exit_px=0.8,
+                                     fee_fn=fee, at=1.0, reallocate=re_)
+        return got, {a["action"]: a for a in got["alternatives"]}, list(calls)
+
+    got, a, fees = alts(Decimal("0.83"))
+    assert a[XM.A_HOLD]["value_usd"] == pytest.approx(0.415)
+    assert a[XM.A_EXIT]["qty"] == 0.83 and a[XM.A_EXIT]["blocker"] is None
+    assert a[XM.A_EXIT]["value_usd"] == pytest.approx(0.83 * 0.8 - 0.0083)
+    assert a[XM.A_REDUCE]["qty"] == 0.41          # 0.415 floored to 0.01
+    assert a[XM.A_REDUCE]["value_usd"] == pytest.approx(
+        0.41 * 0.8 - 0.0041 + 0.42 * 0.5)
+    assert fees == pytest.approx([0.83, 0.41])
+    assert got["recommendation"] == XM.A_EXIT
+    _, a, _ = alts(Decimal("2.41"))
+    assert (a[XM.A_EXIT]["qty"], a[XM.A_REDUCE]["qty"]) == (2.41, 1.2)
+    assert a[XM.A_HOLD]["value_usd"] == pytest.approx(1.205)
+    # below the inventory's step only: 0.01 sells, half of it does not
+    _, a, _ = alts(Decimal("0.01"))
+    assert a[XM.A_EXIT]["qty"] == 0.01
+    assert a[XM.A_REDUCE]["blocker"] == "NOTHING_TO_SELL"
+    _, a, _ = alts(Decimal("0.005"))               # finer than the step
+    assert a[XM.A_EXIT]["blocker"] == "NOTHING_TO_SELL"
+    assert a[XM.A_HOLD]["value_usd"] == pytest.approx(0.0025)
+    # whole inventory: exactly as before
+    for held in (4, Decimal("4.000000")):
+        _, a, fees = alts(held)
+        assert (a[XM.A_EXIT]["qty"], a[XM.A_REDUCE]["qty"]) == (4, 2)
+        assert isinstance(a[XM.A_EXIT]["qty"], int)
+        assert isinstance(a[XM.A_REDUCE]["qty"], int)
+        assert fees == [4.0, 2.0]
+    _, a, _ = alts(3)
+    assert (a[XM.A_EXIT]["qty"], a[XM.A_REDUCE]["qty"]) == (3, 1)
+    _, a, _ = alts(1)
+    assert a[XM.A_EXIT]["qty"] == 1
+    assert a[XM.A_REDUCE]["blocker"] == "NOTHING_TO_SELL"
+    _, a, _ = alts(0)
+    assert a[XM.A_EXIT]["blocker"] == a[XM.A_REDUCE]["blocker"] == \
+        "NOTHING_TO_SELL"
+    assert a[XM.A_HOLD]["value_usd"] == 0.0
+    # the steps are execmirror.plan_sell's own
+    assert XM.held_step(Decimal("2.41")) == M.FRACTIONAL_QTY_STEP
+    assert XM.held_step(3) == XM.held_step(Decimal("3.000000")) == \
+        M.WHOLE_QTY_STEP
+
+
+@pg
+@pytest.mark.parametrize("paper_qty,minimum,fill,held,exit_q,reduce_q", [
+    (833, "0.01", 0.83, Decimal("0.83"), 0.83, 0.41),
+    (2419, "0.01", 2.41, Decimal("2.41"), 2.41, 1.2),
+    (3000, "1", 3, Decimal(3), 3, 1),
+])
+async def test_xavier_records_the_exact_actual_position_through_the_mirror_tick(
+        monkeypatch, paper_qty, minimum, fill, held, exit_q, reduce_q):
+    """Through the ACTUAL lane and mirror.tick with the production wiring
+    (probability reader paper_xavier.live_position_evidence, assessor
+    xavier_management.actual_review_hook): the ACTUAL assessment records
+    open_qty, EXIT and REDUCE at the exact held quantity, the liquidation
+    and marks on it, and the Command Center position room shows the same.
+    A whole position (3) is recorded exactly as before (ints)."""
+    from sportsassets import bettor_paper_ledger as BL
+    from sportsassets import position_rooms as PR
+    from sportsassets.agents import paper_xavier as PX
+    from sportsassets.agents import xavier_management as XM
+    from tests import test_xavier_review_probability_freshness as XRF
+    conn = await TE._conn()
+    po = None
+    try:
+        acct, venue, mirror = await _lane_world(conn, monkeypatch)
+        mirror._probability_reader = PX.live_position_evidence
+        mirror._management_assessor = XM.actual_review_hook
+        _live_mode(monkeypatch)
+        po = await TE._paper_order(conn, acct, qty=paper_qty, wire=0.60)
+        now = time.time()
+        vid = await XRF._reading(conn, po["slug"], decided_at=now - 3600,
+                                 pin_age_s=5.0, p=0.62)
+        did = await XRF._decision(conn, acct, slug=po["slug"], vid=vid,
+                                  p=0.62, at=now - 3600)
+        await conn.execute("UPDATE paper_orders SET decision_id=$2 "
+                           " WHERE order_id=$1", po["order_id"], did)
+        await conn.execute("UPDATE execution_intents SET decision_id=$2 "
+                           " WHERE group_id=$1", po["group_id"], did)
+        venue.markets[po["slug"]] = _market(po["slug"], minimum=minimum)
+        venue.behaviour = [{"fill": fill}]
+        res = await mirror.lane._run(conn, po["intent_id"])
+        assert res["state"] == EI.A_SUBMITTED, res
+        assert [p["quantity"] for p in venue.placed] == [fill]
+        await TE._paper_fill(conn, acct, po, qty=paper_qty, price=0.60)
+        await mirror.tick(conn)
+        inv = await M.live_inventory(conn, po["group_id"])
+        assert inv["held"] == held
+        rev = await conn.fetchrow(
+            "SELECT r.live_held, r.detail FROM smalllive_reviews r JOIN "
+            " smalllive_handoffs h USING (handoff_id) WHERE h.group_id=$1",
+            po["group_id"])
+        assert rev["live_held"] == held
+        mgmt = _j(rev["detail"])["management"]
+        assert mgmt.get("ok", True) is not False, mgmt
+        a = dict(await conn.fetchrow(
+            "SELECT * FROM xavier_management_assessments WHERE group_id=$1 "
+            "   AND position_kind='ACTUAL'", po["group_id"]))
+        ve = _j(a["venue_economics"])
+        marks = ve["marks"]
+        assert marks["open_qty"] == exit_q             # never int()-truncated
+        assert isinstance(marks["open_qty"], type(exit_q))
+        px = ve["exit_px_held_side"]
+        assert px == pytest.approx(0.40)
+        fee = float(BL._fee(None, held, px, a["assessed_at"].timestamp()))
+        assert ve["liquidation_value_usd"] == pytest.approx(
+            float(held) * px - fee, abs=1e-6)
+        assert marks["actual_mark_pnl_usd"] == pytest.approx(
+            marks["cash_to_date_usd"] + ve["liquidation_value_usd"], abs=1e-6)
+        assert marks["exit_net_per_contract"] == pytest.approx(
+            ve["liquidation_value_usd"] / float(held), abs=1e-6)
+        alts = {x["action"]: x for x in _j(a["alternatives"])}
+        assert a["probability"] is not None       # the entry decision's 0.62
+        assert alts[XM.A_HOLD]["value_usd"] == pytest.approx(
+            float(held) * float(a["probability"]), abs=1e-6)
+        assert alts[XM.A_HOLD]["value_usd"] > 0
+        assert alts[XM.A_EXIT]["qty"] == exit_q
+        assert alts[XM.A_EXIT]["blocker"] != "NOTHING_TO_SELL"
+        assert alts[XM.A_REDUCE]["qty"] == reduce_q
+        th = await conn.fetchrow(
+            "SELECT entry_qty FROM xavier_entry_theses WHERE group_id=$1 "
+            "   AND position_kind='ACTUAL'", po["group_id"])
+        assert th is not None and Decimal(str(th["entry_qty"])) == held
+        # THE COMMAND CENTER POSITION ROOM shows the same exact record
+        raw = await PR.load(conn, book=PR.B_ACTUAL, venue=PR.V_PM)
+        room = next(r for r in PR.build_rooms(raw)
+                    if po["group_id"] in r["groups"])
+        xp = next(p for p in room["xavier"] if p["group_id"] == po["group_id"])
+        assert xp["status"] == "OK", xp
+        assert xp["venue_economics"]["marks"]["open_qty"] == exit_q
+        rows = {r["recorded_action"]: r for r in xp["alternatives"]}
+        assert rows[XM.A_EXIT]["qty"] == pytest.approx(exit_q)
+        assert rows[XM.A_REDUCE]["qty"] == pytest.approx(reduce_q)
+    finally:
+        if po is not None:
+            from tests import test_xavier_review_probability_freshness as XRF
+            await XRF._purge(conn, [po["slug"]])
         await conn.close()
 
 
