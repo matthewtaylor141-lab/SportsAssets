@@ -17,7 +17,7 @@ import re
 
 from tests import _audrey_chat_fixture as F
 from tests import _persona_harness as H
-from tests._persona_harness import db, pg  # noqa: F401  (fixture)
+from tests._persona_harness import db, pg, private_db  # noqa: F401  (fixtures)
 
 Q = "Walk me through the Yankees position."
 DEMO = {"demonstration": True}
@@ -71,7 +71,11 @@ def test_the_yankees_walkthrough_agrees_and_the_perspectives_differ(
 
 
 @pg
-def test_no_yankees_position_is_said_truthfully(db, monkeypatch):
+def test_no_yankees_position_is_said_truthfully(private_db, db, monkeypatch):
+    """Runs on a DATABASE OF ITS OWN (`private_db`): the fact search reads
+    every paper table for any record naming the team, so the proof that none
+    exists is only true of a database no neighbour has written to. Every
+    assertion below is unchanged."""
     H.no_keys(monkeypatch)
     client = H.build_client(monkeypatch, F.Clock(H.T0))
     seen = []
@@ -101,6 +105,53 @@ def test_no_yankees_position_is_said_truthfully(db, monkeypatch):
         assert not re.search(r"\$\d", g["answer"])
         seen.append(g["answer"])
     assert len(set(seen)) == 3
+
+
+@pg
+def test_a_neighbours_default_yankees_paper_order_is_what_flips_the_answer(
+        private_db, db, monkeypatch):
+    """THE LEAK THE PRIVATE DATABASE CLOSES, MADE ON PURPOSE. One paper order
+    from the shared paper harness -- `paper_harness.order()` defaults its
+    market slug to "test-mkt-yankees", and 184 test files (at f971d665) import
+    that harness and COMMIT through it -- is a record naming the team in an
+    append-only table. The very same question that says "no production or
+    paper yankees" on an empty database then FINDS a position (found True,
+    paper_orders matched), which is what the second capital-critical run on
+    one database saw. The fact search is right to: that IS a record naming
+    the Yankees. Only the shared database was wrong to hold it for a proof of
+    absence."""
+    from sportsassets import bettor_paper_ledger as L
+    from tests import paper_harness as PH
+
+    H.no_keys(monkeypatch)
+    client = H.build_client(monkeypatch, F.Clock(H.T0))
+    # BEFORE: on this database of its own, the truthful absence
+    r = _ask(client, "derek", Q)
+    assert r.status_code == 200, r.text
+    g = r.json()
+    assert g["found"] is False and g["facts"] == [], g["checked"]
+    assert "no production or paper yankees" in g["answer"].lower()
+
+    async def _neighbour():
+        c = await F.connect()
+        try:
+            acct = await PH.new_account(c, "persona_nbr")
+            o = PH.order(acct, key="n1", qty=10, limit=0.40)
+            got = await L.submit_order(c, o, fee_fn=PH.zero_fee, now=PH.T0)
+            assert got["ok"], got
+            return o["us_market_slug"]
+        finally:
+            await c.close()
+    slug = F.run(_neighbour())
+    assert "yankees" in slug
+    # AFTER one neighbour's default paper order: the same question FINDS it
+    H.reset_process_state()
+    r = _ask(client, "derek", Q)
+    assert r.status_code == 200, r.text
+    g = r.json()
+    assert g["found"] is True, g["checked"]
+    assert any(c["source"] == "paper_orders" and c["status"] == "MATCHED"
+               for c in g["checked"]), g["checked"]
 
 
 @pg

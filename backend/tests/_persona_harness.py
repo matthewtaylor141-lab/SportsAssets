@@ -92,6 +92,62 @@ def db():
     F.run(_down())
 
 
+@pytest.fixture
+def private_db(monkeypatch):
+    """A DATABASE THAT HOLDS ONLY WHAT THIS TEST WRITES.
+
+    For a proof of ABSENCE -- "no Yankees record exists, and the answer says
+    so". The persona fact search is a text search over the WHOLE paper ledger
+    and every other table it reads, by design (it finds the position a person
+    asks about wherever it was written), so such a proof is only as true as
+    the database it reads: one neighbour that COMMITS a record naming the
+    team -- and the paper tables are append-only, nothing cleans them -- turns
+    the answer into "found". Many suites do: paper_harness.order() defaults
+    its market slug to "test-mkt-yankees", and the position-room, correlation,
+    management-view and collector proofs seed "New York Yankees" books. They
+    pass alone and on a fresh database; the second capital-critical run on
+    one database found their leftovers (test_agent_persona_chat_is_grounded
+    ::test_no_yankees_position_is_said_truthfully).
+
+    So the test runs on a database of its own: created empty on the shared
+    server, migrated by production's runner (exactly as
+    test_fresh_database_migrates does), pointed at by the Audrey chat
+    harness's DSN for the test's duration, and dropped afterwards. The
+    shared database is neither read nor written by the test. Request it
+    BEFORE `db`, which then purges and seeds this database."""
+    import os
+    import subprocess
+    import sys
+    import urllib.parse
+    import uuid
+
+    asyncpg = pytest.importorskip("asyncpg")
+    shared = F.DSN
+    name = "persona_%s" % uuid.uuid4().hex[:12]
+    parts = urllib.parse.urlsplit(shared)
+    private = urllib.parse.urlunsplit(parts._replace(path="/" + name))
+
+    async def _admin(sql):
+        c = await asyncpg.connect(shared)
+        try:
+            await c.execute(sql)
+        finally:
+            await c.close()
+
+    F.run(_admin('CREATE DATABASE "%s"' % name))
+    try:
+        done = subprocess.run(
+            [sys.executable, "-m", "sportsassets.scripts.migrate"],
+            cwd=str(ROOT), env=dict(os.environ, DATABASE_URL=private),
+            capture_output=True, text=True, timeout=1200)
+        assert done.returncode == 0, done.stderr[-4000:]
+        monkeypatch.setattr(F, "DSN", private)
+        monkeypatch.setattr(sys.modules[__name__], "DSN", private)
+        yield private
+    finally:
+        F.run(_admin('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % name))
+
+
 def no_keys(monkeypatch):
     for k in ("ANTHROPIC_API_KEY", "ELEVENLABS_API_KEY", "AUDREY_PROVIDER",
               "PERSONA_VOICE", "ELEVENLABS_VOICE_ID_DEREK",

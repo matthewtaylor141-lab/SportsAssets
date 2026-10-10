@@ -726,6 +726,43 @@ async def test_production_sized_decisions_never_make_the_shadow_the_live_fill_ra
         await conn.close()
 
 
+async def _quiet_instant(conn, *, lead: float, span: float) -> float:
+    """The instant T a bounded-read proof dates its decisions at, chosen so
+    that the read window [T - lead, T + span] holds NO committed canonical
+    intent that another test (or process) left in the shared database.
+
+    WHY IT IS NEEDED. The read under test counts every PAPER intent whose
+    created_at falls in the window, whoever wrote it -- it is the global
+    calibration read, scoped by time and by adapter and deliberately by
+    nothing else. The proofs that run the paper pass on a plain connection
+    (paper_live_fixture's paper-live-syn-* decisions in
+    test_live_parity_through_the_paper_pass, test_rc63_one_paper_decision_
+    through_every_duty, test_settlement_exception_risk and
+    test_opportunity_score_tournament; the aec-nfl-* / aec-cfb-* ones in
+    test_nfl_ and test_ncaaf_through_the_paper_pass) COMMIT, and they date
+    their decisions time.time() + 5.0. A committed PAPER intent therefore
+    stays dated 4.5 - 6 s AHEAD of the moment it was written, in a database
+    the whole suite shares and that nothing may clean (the table is
+    append-only). The next test to open a 3 s window around "now" within
+    ~6 s of such a file found a stranger's row inside it: rows_in_window
+    4 (or 5) == 3, and the same test passed alone. This walks T past every
+    committed intent in its window until the window is empty, so the three
+    rows the test makes are the only rows in it.
+    """
+    T = time.time()
+    for _ in range(1000):
+        newest = await conn.fetchval(
+            "SELECT max(extract(epoch FROM created_at))::float8 "
+            "  FROM canonical_decision_intents "
+            " WHERE created_at >= to_timestamp($1) "
+            "   AND created_at <= to_timestamp($2)", T - lead, T + span)
+        if newest is None:
+            return T
+        T = float(newest) + lead + 0.001
+    raise AssertionError("no empty %.1f s window among the committed "
+                         "canonical intents" % (lead + span))
+
+
 @pg
 async def test_a_bounded_read_keeps_the_newest_and_says_it_truncated(
         monkeypatch):
@@ -735,7 +772,9 @@ async def test_a_bounded_read_keeps_the_newest_and_says_it_truncated(
     try:
         await F.prepare(conn)
         acct = await H.new_account(conn, "xcalcap")
-        T = time.time()
+        # the window [T - 0.5, T + 2.5] is read globally: T is chosen where
+        # no other test's committed (future-dated) intent already sits
+        T = await _quiet_instant(conn, lead=0.5, span=2.5)
         tag = uuid.uuid4().hex[:6]
         made = []
         for i in range(3):
@@ -758,6 +797,67 @@ async def test_a_bounded_read_keeps_the_newest_and_says_it_truncated(
                               now=T + 10)
         assert rep["truncated"] is True
         assert rep["classes"]["PAPER_SIMULATION"]["read"]["truncated"]
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_a_neighbours_future_dated_intent_never_enters_the_bounded_window(
+        monkeypatch):
+    """THE LEAK, MADE ON PURPOSE (the bounded read's window is global).
+    A neighbour's intent -- dated 1 s ahead, as the through-the-paper-pass
+    proofs date theirs (time.time() + 5.0) and then COMMIT -- sits inside
+    the window a test would naively open around "now". The window the
+    bounded-read proof uses is walked past it, and over that window the read
+    still counts exactly the three rows the test made, keeps the newest two
+    and says it truncated: the bounded read asserts what it always asserted,
+    here with a stranger's intent next door."""
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await F.prepare(conn)
+        other = await H.new_account(conn, "xcalnb")
+        acct = await H.new_account(conn, "xcalcap2")
+        now = time.time()
+        tag = uuid.uuid4().hex[:6]
+        nb = await F.decision(conn, other, T=now + 1.0,
+                              slug="test-xcalnb-%s" % tag,
+                              event="ev-nb-%s" % tag,
+                              offers=[(0.50, 3000)], bids=[(0.48, 3000)])
+        nb_id = nb["intent"]["intent_id"]
+        # the naive window around "now" holds the neighbour -- the defect
+        assert nb_id in {r["intent_id"] for r in await conn.fetch(
+            "SELECT intent_id FROM canonical_decision_intents "
+            " WHERE created_at >= to_timestamp($1) "
+            "   AND created_at <= to_timestamp($2)", now - 0.5, now + 2.5)}
+        # the quiet window starts after it and holds no other committed row
+        T = await _quiet_instant(conn, lead=0.5, span=2.5)
+        assert T - 0.5 > now + 1.0
+        assert await conn.fetchval(
+            "SELECT count(*) FROM canonical_decision_intents "
+            " WHERE created_at >= to_timestamp($1) "
+            "   AND created_at <= to_timestamp($2)",
+            T - 0.5, T + 2.5) == 0
+        made = []
+        for i in range(3):
+            d = await F.decision(conn, acct, T=T + i,
+                                 slug="test-xcalnb2-%s-%d" % (tag, i),
+                                 event="ev-nb2-%s-%d" % (tag, i),
+                                 offers=[(0.50, 3000)], bids=[(0.48, 3000)])
+            r = await F.fill(conn, d, at=T + i + 4, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+            assert r["state"] == "FILLED", r
+            made.append(d["intent"]["intent_id"])
+        monkeypatch.setattr(XC, "MAX_INTENTS", 2)
+        obs, ex, rd = await XC.paper_observations(conn, since=T - 0.5,
+                                                  until=T + 2.5)
+        assert rd["truncated"] is True and rd["cap"] == 2
+        assert rd["rows_in_window"] == 3 and rd["rows_read"] == 2
+        assert {o["intent_id"] for o in obs} == set(made[1:])   # the newest
+        assert nb_id not in {o["intent_id"] for o in obs}
+        assert ex["NOT_READ_OLDER_THAN_THE_2_MOST_RECENT"] == 1
     finally:
         await tx.rollback()
         await conn.close()

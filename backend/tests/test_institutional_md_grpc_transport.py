@@ -81,7 +81,26 @@ class Abort:
 
 class FakeVenue(pb2_grpc.MarketDataSubscriptionAPIServicer):
     """Scripted per connection. Records the authorization metadata and EVERY
-    client-to-server message, so a test can prove what the client sent."""
+    client-to-server message, so a test can prove what the client sent.
+
+    A connection STREAMS ONLY AFTER THE CLIENT'S OPENING COMMAND HAS BEEN
+    READ, as the venue does (it answers a subscription it has received, never
+    one it has not). The fake used to start answering at once and, when a
+    script ended without a Wait gate, finish the call at once: gRPC then
+    discards whatever the client sent that the server's reader thread had not
+    yet taken, so `received` lost the client's subscribe whenever that thread
+    (or the client's request-sender thread) was scheduled late. On an idle
+    host the reader always won and nothing showed; on a loaded one
+    test_ump_subscribe_all::test_every_reconnect_sends_exactly_one_empty_
+    subscribe saw 0 or 1 of its 2 subscribes and waited its 10 s for a
+    message that could never arrive (16 of 30 runs with four CPU-bound
+    processes on a 4-CPU host, every failure the 10 s wait expiring; 30 of
+    30 clean with this fake, under the same load). The wait below is on the
+    EVENT -- the first request read, or the client's side closing -- and
+    `opened_within_s` only bounds a client that neither sends nor closes; it
+    is never a pacing delay."""
+
+    opened_within_s = 10.0
 
     def __init__(self):
         self.scripts = []
@@ -101,13 +120,19 @@ class FakeVenue(pb2_grpc.MarketDataSubscriptionAPIServicer):
         if token not in self.good_tokens:
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "bad token")
 
+        opened = threading.Event()
+
         def drain():
             try:
                 for req in request_iterator:
                     self.received.append(req)
+                    opened.set()
             except Exception:                                 # noqa: BLE001
                 pass
+            finally:
+                opened.set()          # the client's side is over: nothing to wait for
         threading.Thread(target=drain, daemon=True).start()
+        opened.wait(self.opened_within_s)
         for step in script:
             if isinstance(step, Wait):
                 step.ev.wait(10)
@@ -348,6 +373,36 @@ def test_the_supervised_loop_reconnects_with_bounded_backoff(venue):
     assert sleeps[0] == IS.RECONNECT_BACKOFF_S[0]          # after 'ended'
     assert sleeps[1] == IS.RECONNECT_BACKOFF_S[1]          # after one error
     assert all(s <= max(IS.RECONNECT_BACKOFF_S) for s in sleeps)
+
+
+def test_a_script_that_ends_at_once_still_receives_the_clients_opening_command(
+        venue):
+    """THE RACE THE FAKE USED TO HAVE, MADE DETERMINISTIC. A script with no
+    Wait gate delivers its book and ends the call; the client's opening
+    subscribe is sent by gRPC's own sender thread, and when that thread is
+    scheduled after the server's reader (a loaded host) the call used to be
+    over before the command was read, so the server never recorded it. Here
+    the client's sender is held back for half a second on purpose -- the
+    worst scheduling, with no dependence on the host's load -- and the fake
+    still records the command, because it streams only after reading it."""
+    b = books_for()
+    venue.scripts = [[book()]]                       # no gate: ends at once
+    t = transport(b, venue)
+    real = t._requests
+
+    def late_sender(first, done=None):
+        it = real(first, done)
+
+        def gen():
+            time.sleep(0.5)                          # a sender thread run late
+            yield from it
+        return gen()
+    t._requests = late_sender
+    assert t.run_once() == "ended"
+    assert len(venue.received) == 1
+    assert venue.received[0].WhichOneof("command") == "subscribe"
+    assert list(venue.received[0].subscribe.symbols) == [SYM]
+    assert_only_subscribe_and_keepalive(venue)
 
 
 # ── §5 unreachable venue; what the client sends ─────────────────────────

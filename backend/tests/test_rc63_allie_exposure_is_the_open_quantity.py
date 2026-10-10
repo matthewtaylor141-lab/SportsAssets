@@ -643,10 +643,30 @@ async def test_production_shape_exited_groups_are_zero_where_the_old_reads_count
 # ───────────────────────────── static pins ────────────────────────────────
 
 def test_the_exposure_statements_are_built_on_the_canonical_open_rule():
-    assert OPC.CANONICAL_OPEN_POSITIONS_SQL in OPC.OPEN_EXPOSURE_ROWS_SQL
+    # (RC6.3c allie-exposure scale) the exposure rows are the canonical
+    # rule's OWN template expanded with the account scope inside its scans
+    # and the cost columns out of the same pass -- not a copy of the rule:
+    # the bare expansion IS the canonical statement, byte for byte, and the
+    # scoped one stripped of exactly those expansions is the same text
+    assert OPC.open_positions_sql() == OPC.CANONICAL_OPEN_POSITIONS_SQL
+    scoped = OPC.open_positions_sql(account_scoped=True, with_cost=True)
+    assert scoped in OPC.OPEN_EXPOSURE_ROWS_SQL
+    assert scoped != OPC.CANONICAL_OPEN_POSITIONS_SQL
+    bare = scoped
+    for piece in OPC.OPEN_POSITIONS_EXPANSIONS:
+        assert piece in scoped, piece
+        bare = bare.replace(piece, "")
+    assert bare == OPC.CANONICAL_OPEN_POSITIONS_SQL
+    # the scope is $1 inside BOTH scans, NULL meaning every account
+    assert "FROM paper_fills\n             WHERE ($1::text IS NULL OR " \
+        "account_id = $1::text)" in scoped
+    assert "FROM paper_settlements\n                  WHERE ($1::text IS " \
+        "NULL OR starts_with(" in scoped
     assert OPC.OPEN_EXPOSURE_ROWS_SQL in OPC.OPEN_EXPOSURE_FIXTURE_SQL
     assert OPC.OPEN_EXPOSURE_ROWS_SQL in OPC.OPEN_EXPOSURE_BOOK_SQL
-    for sql in (OPC.OPEN_EXPOSURE_FIXTURE_SQL, OPC.OPEN_EXPOSURE_BOOK_SQL):
+    assert OPC.OPEN_EXPOSURE_ROWS_SQL in OPC.OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL
+    for sql in (OPC.OPEN_EXPOSURE_FIXTURE_SQL, OPC.OPEN_EXPOSURE_BOOK_SQL,
+                OPC.OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL):
         low = " ".join(sql.lower().split())
         # reads only; and never "no settlement row" as the test of open
         for bad in ("insert ", "update ", "delete ", "not exists",
