@@ -253,7 +253,7 @@ base `412c4962`, a defect fixed in this lane). `C01`–`C30` are
 | ★ a snapshot past a lost message gaps every market of the sid | `test_red_team_scenarios.py::test_replay_a_snapshot_past_a_lost_message_gaps_every_market_of_the_sid` | Kalshi WS sequence |
 | a duplicated delta is never applied twice | `test_red_team_scenarios.py::test_replay_a_duplicated_delta_is_never_applied_twice` | Kalshi WS sequence |
 | ★ a gapped sid is untrusted until re-announced; a re-announced sid is a new subscription | `test_red_team_scenarios.py::test_replay_a_reannounced_sid_is_a_new_subscription` | Kalshi WS sequence |
-| ★ end to end: the subscriber resubscribes and serves only the fresh book | `test_red_team_scenarios.py::test_replay_end_to_end_the_subscriber_resubscribes_and_serves_only_fresh` | KALSHI_HEALTH / `kalshi_books_current` |
+| ★ end to end: the subscriber asks the same sid for a fresh snapshot (RC6.2: get_snapshot; it used to resubscribe) and serves only the fresh book | `test_red_team_scenarios.py::test_replay_end_to_end_the_subscriber_asks_a_fresh_snapshot_and_serves_only_fresh` | KALSHI_HEALTH / `kalshi_books_current` |
 
 ### 2.5 Reconnect — never serve pre-resync state
 
@@ -261,7 +261,7 @@ base `412c4962`, a defect fixed in this lane). `C01`–`C30` are
 |---|---|---|
 | PMX stream killed: GAP; reconnect needs a full update | `test_red_team_chaos.py::test_c01_kill_pmx_books_gap_reconnect_needs_a_full_update`; `test_institutional_stream.py::test_a_dropped_connection_is_a_gap_until_a_fresh_snapshot` | VENUE_HEALTH |
 | connected without a snapshot is never current | `test_red_team_chaos.py::test_c13_connected_without_a_snapshot_is_never_current` | VENUE_HEALTH |
-| Kalshi disconnect: every book GAP, never reused | `test_kalshi_ws_market_data.py::test_a_disconnect_marks_every_book_gap_and_never_reuses_it`, `::test_the_subscriber_resubscribes_after_a_gap_and_waits_for_the_snapshot` | KALSHI_HEALTH |
+| Kalshi disconnect: every book GAP, never reused | `test_kalshi_ws_market_data.py::test_a_disconnect_marks_every_book_gap_and_never_reuses_it`, `::test_the_subscriber_asks_the_sid_for_a_snapshot_after_a_gap_and_waits` | KALSHI_HEALTH |
 | PMUS stream: a book from a previous connection epoch is ineligible at any age | `test_bettor_market_stream.py::TestADisconnectInvalidatesEveryBook::test_a_book_from_a_previous_epoch_is_ineligible_at_any_age` | PMUS eligibility |
 | Polymarket reconnect changes only Polymarket's health | `test_red_team_chaos.py::test_c03_a_polymarket_reconnect_changes_only_polymarket` | VENUE_HEALTH (per venue) |
 | a dropped provider revokes the feed; its last price never enters | `test_chaos_provider_disconnect_and_delayed_settlement.py::test_a_silent_providers_last_price_never_enters_and_a_fresh_one_does`, `::test_a_dropped_provider_revokes_the_feed_and_blocks_xavier_on_market_data` | entry / Xavier freshness |

@@ -14,15 +14,24 @@ DEDICATED_ONLY_LOOPS; it is not in LOOPS).
   books        kalshi_ws.Subscriber over the tracked game markets
                (kalshi_fixtures_current, written by the REST catalogue loop)
   persistence  kalshi_books_current, book_basis KALSHI_WS_...: a changed
-               CURRENT book is written within ~2 s; every CURRENT book's
-               observed_at is re-asserted every 10 s (the stream proves it
-               current); a GAP book is written readable = false at once, so
-               no reader routes a pre-gap book
+               CURRENT book is written within ~2 s (the flush); every
+               CURRENT book's observed_at is re-asserted every 10 s (the
+               stream proves it current) while its row holds the book as it
+               is now; (RC6.2) a book that leaves CURRENT (a gap, the
+               venue ending the subscription, a disconnect) has its row made
+               readable = false AT ONCE -- the runtime awaits the write
+               (gap_sink, bounded) before it reads the next frame, so no
+               reader is served a pre-gap row between the gap and the next
+               flush; a market no longer tracked has its row made unreadable
+               at the wanted-set refresh that drops it (UNTRACKED)
   heartbeat    service kalshi_ws_market_data, domain KALSHI_HEALTH (never
                blended with POLYMARKET_HEALTH): connected, subscribed
                markets, current / gap counts, snapshots / deltas / gaps /
                resubscribes, the oldest current-book update age, account
-               limits, REST pacing derived from them
+               limits, REST pacing derived from them; (RC6.2) why the last
+               session ended (session_end: a storm bound, a gap during
+               recovery, the venue ending the subscription), the commands
+               sent by kind and the immediate GAP writes that failed
 
 STRUCTURALLY READ-ONLY: imports kalshi_ws, the db helpers and nothing that
 can place, cancel, fund or authorize (test_kalshi_ws_market_data checks the
@@ -58,6 +67,8 @@ HEARTBEAT_EVERY_S = 15.0
 LOOKAHEAD_S = 36 * 3600.0
 LOOKBACK_S = 4 * 3600.0
 MAX_MARKETS = 2000
+#: the error a row of a market no longer tracked is retired with
+UNTRACKED = "UNTRACKED:KALSHI_WS_MARKET_NOT_TRACKED"
 OWNER_ACTION = (
     "provision a Kalshi API key (Ed25519 -- Kalshi's default -- or RSA) as "
     "KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PEM on the dedicated "
@@ -86,6 +97,14 @@ async def wanted_tickers(conn, *, now: float) -> list:
         if r["tie_ticker"]:
             out.append(r["tie_ticker"])
     return sorted(set(out))[:MAX_MARKETS]
+
+
+#: (RC6.2) the statement that makes rows unreadable the moment their books
+#: leave CURRENT (one per gap, for every market it touched)
+GAP_ROWS_SQL = (
+    "UPDATE kalshi_books_current SET readable = false, error = $2, "
+    " updated_at = now() WHERE ticker = ANY($1::text[]) AND book_basis = $3"
+    " AND readable")
 
 
 async def write_book(conn, ticker: str, books: KWS.WsBooks, *,
@@ -117,6 +136,110 @@ async def write_book(conn, ticker: str, books: KWS.WsBooks, *,
             ticker, "%s:%s" % (cur["state"], cur.get("why")), KWS.BOOK_BASIS)
 
 
+def flush_key(b: dict) -> tuple:
+    """What the flush compares: the book's state and the stamp of its
+    latest change (WsBooks bumps it on every level or state change). The
+    key used to be (state, seq, updated_at): a gap, a resubscribe and a
+    fresh snapshot at the same seq inside one clock tick (or on a clock
+    that stepped back) left the same key, so the row kept the pre-gap
+    book."""
+    return (b["state"], b.get("rev"))
+
+
+class _NoLock:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *a):
+        return False
+
+
+async def flush(conn, books: KWS.WsBooks, written: dict, *,
+                now: float, lock=None) -> int:
+    """Write every book whose key changed since it was last written;
+    `written` then holds, per market, the key of the book its row holds.
+    The key is taken in the same step as write_book reads the book (no
+    suspension between them), so it names exactly what was written.
+    (RC6.2) Each row is written under `lock`, the lock the immediate GAP
+    write takes too, so a GAP write can never land BEFORE a CURRENT write of
+    the same row that read the pre-gap book (the GAP write waits for at most
+    one row)."""
+    n = 0
+    lock = lock or _NoLock()
+    for t in list(books.books):
+        async with lock:
+            b = books.books.get(t)
+            if b is None:
+                continue
+            k = flush_key(b)
+            if written.get(t) != k:
+                await write_book(conn, t, books, now=now)
+                written[t] = k
+                n += 1
+    return n
+
+
+async def write_gaps(conn, books: KWS.WsBooks, written: dict,
+                     tickers) -> int:
+    """(RC6.2) THE PRE-GAP ROW IS NEVER SERVED. Every listed market whose
+    book is not CURRENT now has its row made unreadable at once, named by
+    its state and reason, and `written` records the key of what the row now
+    holds (the flush then has nothing to redo). The window the second review
+    found -- between a gap and the next flush (up to FLUSH_EVERY_S) a reader
+    took the row of the pre-gap book as a current WebSocket book -- is
+    closed: the runtime awaits this before it reads the next frame. Returns
+    how many markets."""
+    by_err: dict = {}
+    for t in sorted(set(tickers)):
+        b = books.books.get(t)
+        if b is None:
+            continue
+        cur = books.current(t)
+        if cur["ok"]:
+            continue
+        by_err.setdefault("%s:%s" % (cur["state"], cur.get("why")),
+                          []).append(t)
+    n = 0
+    for err, ts in sorted(by_err.items()):
+        await conn.execute(GAP_ROWS_SQL, ts, err, KWS.BOOK_BASIS)
+        for t in ts:
+            b = books.books.get(t)
+            if b is not None:
+                written[t] = flush_key(b)
+        n += len(ts)
+    return n
+
+
+def gap_sink(get_pool_fn, books: KWS.WsBooks, written: dict, lock):
+    """The Subscriber's gap_sink: write_gaps on a connection of the pool,
+    under the flush's lock -- taken only once the connection is held, so the
+    flush (which holds a connection and waits on the lock between rows) and
+    the GAP write can never wait on each other."""
+    async def sink(tickers):
+        pool = await get_pool_fn()
+        async with pool.acquire() as conn:
+            async with lock:
+                await write_gaps(conn, books, written, tickers)
+    return sink
+
+
+async def retire_untracked(conn, want) -> None:
+    """(RC6 acceptance model) No WebSocket-basis row reads readable for a
+    market the runtime does not track. A dropped market's row used to stay
+    readable = true at its last observed_at (re-asserted up to 10 s
+    before), so for up to BOOK_SLA_S every reader -- REST ws_current (REST
+    then skips it), db_freshness, the claim scan -- took a book nobody
+    maintained any more as current; a row left by an earlier process (its
+    market no longer wanted at restart) stayed readable for ever. One
+    statement per wanted-set refresh: every readable WS row outside the
+    wanted set is made unreadable, named UNTRACKED."""
+    await conn.execute(
+        "UPDATE kalshi_books_current SET readable = false, error = $2, "
+        " updated_at = now() WHERE book_basis = $1 AND readable AND "
+        " NOT (ticker = ANY($3::text[]))",
+        KWS.BOOK_BASIS, UNTRACKED, sorted(set(want)))
+
+
 def prune_untracked(sub, written: dict, want) -> int:
     """(RC6) The books, the written-key map and the tracked subscription of
     every market no longer in the wanted set are dropped (KWS.Subscriber.
@@ -124,9 +247,8 @@ def prune_untracked(sub, written: dict, want) -> int:
     how many. Without it all three grew with every market the
     runtime ever tracked (production 2026-10-09: 235 books held, 185
     wanted; research-sql rc6_api-responsive_kalshi_ws_growth.sql), and the
-    heartbeat's freshness counted the 50 untracked ones. The book rows
-    already written stay as they are: no longer re-asserted, they age past
-    every reader's freshness bound."""
+    heartbeat's freshness counted the 50 untracked ones. Their rows are
+    made unreadable in the same pass (retire_untracked)."""
     keep = set(want)
     gone = [t for t in list(sub.books.books) if t not in keep]
     gone += [t for t in list(written) if t not in keep and t not in gone]
@@ -142,8 +264,16 @@ def _lv(levels) -> str:
     return json.dumps([[str(p), int(q)] for p, q in (levels or ())])
 
 
-async def reassert(conn, books: KWS.WsBooks, *, now: float) -> int:
-    cur = [t for t in books.books if books.current(t)["ok"]]
+async def reassert(conn, books: KWS.WsBooks, *, now: float,
+                   written: dict | None = None) -> int:
+    """Re-stamp observed_at of the rows of CURRENT books. Given `written`
+    (the flush's keys), only a row that holds the book as it is now: a
+    reassert due when the flush is not used to re-stamp a row still holding
+    the PRE-GAP book of a market whose fresh snapshot had arrived since the
+    last flush (review of ca102147); that row now keeps its age until the
+    flush rewrites it."""
+    cur = [t for t, b in books.books.items() if books.current(t)["ok"]
+           and (written is None or written.get(t) == flush_key(b))]
     if not cur:
         return 0
     await conn.execute(
@@ -210,6 +340,14 @@ def health(books: KWS.WsBooks, sub, *, now: float, limits, pace,
                 "still_subscribed_until_session_end": len(
                     getattr(books, "forgotten", ()) or ())},
             "last_error": getattr(sub, "last_error", None),
+            # (RC6.2) why sessions ended (a storm bound, a gap during
+            # recovery, the venue ending the subscription), what was sent
+            "session_end": {
+                "last": getattr(sub, "last_end_reason", None),
+                "by_reason": dict(getattr(sub, "session_ends", {}) or {}),
+                "storms": getattr(sub, "storms", 0)},
+            "commands_sent": dict(getattr(sub, "commands_sent", {}) or {}),
+            "gap_writes_failed": getattr(sub, "gap_sink_failures", 0),
             "subscribed_markets": len(getattr(sub, "subscribed", ()) or ()),
             "current_book_update_age_s": {
                 "max": round(max(ages), 1) if ages else None,
@@ -282,12 +420,15 @@ async def run(get_pool_fn=get_pool, *, env=None) -> None:
             await asyncio.sleep(300)
     books = KWS.WsBooks()
     want: list = []
+    written: dict = {}
+    # (RC6.2) the flush and the immediate GAP write share one lock
+    lock = asyncio.Lock()
     sub = KWS.Subscriber(KWS.websockets_connect(key_id, pk), books,
-                         wanted=lambda: want)
+                         wanted=lambda: want,
+                         gap_sink=gap_sink(get_pool_fn, books, written, lock))
     state = {"limits": None, "limits_at": 0.0, "dirty_at": {}}
     task = asyncio.create_task(sub.run())
     last = {"want": 0.0, "flush": 0.0, "reassert": 0.0, "beat": 0.0}
-    written: dict = {}
     while True:
         now = time.time()
         try:
@@ -295,8 +436,11 @@ async def run(get_pool_fn=get_pool, *, env=None) -> None:
             async with pool.acquire() as conn:
                 if now - last["want"] >= WANTED_EVERY_S:
                     want[:] = await wanted_tickers(conn, now=now)
+                    # (RC6.2) the runtime re-reads the list in full now
+                    sub.wanted_changed()
                     last["want"] = now
                     prune_untracked(sub, written, want)
+                    await retire_untracked(conn, want)
                 if now - state["limits_at"] >= LIMITS_EVERY_S:
                     try:
                         state["limits"] = await read_limits(key_id, pk,
@@ -307,14 +451,13 @@ async def run(get_pool_fn=get_pool, *, env=None) -> None:
                     state["limits_at"] = now
                     await record_limits(conn, state["limits"])
                 if now - last["flush"] >= FLUSH_EVERY_S:
-                    for t, b in list(books.books.items()):
-                        key = (b["state"], b["seq"], b["updated_at"])
-                        if written.get(t) != key:
-                            await write_book(conn, t, books, now=now)
-                            written[t] = key
+                    # (the loop variable used to be `key`, overwriting the
+                    # key class the heartbeat reports: after the first flush
+                    # the beat's `key` was a book's flush tuple)
+                    await flush(conn, books, written, now=now, lock=lock)
                     last["flush"] = now
                 if now - last["reassert"] >= REASSERT_EVERY_S:
-                    await reassert(conn, books, now=now)
+                    await reassert(conn, books, now=now, written=written)
                     last["reassert"] = now
                 if now - last["beat"] >= HEARTBEAT_EVERY_S:
                     pace = KWS.pacing(state["limits"])

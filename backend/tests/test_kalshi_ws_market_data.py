@@ -158,13 +158,23 @@ class FakeWS:
         self.closed = True
 
 
-def test_the_subscriber_resubscribes_after_a_gap_and_waits_for_the_snapshot():
+def test_the_subscriber_asks_the_sid_for_a_snapshot_after_a_gap_and_waits():
+    """(RC6.2; was test_the_subscriber_resubscribes_after_a_gap_and_waits_
+    for_the_snapshot, which pinned unsubscribe + subscribe.) docs.kalshi.com
+    changelog 2025-09-25: a repeated subscribe merges into the existing sid
+    ("If passing the same market tickers as before, no action will be
+    taken") -- so the repair is update_subscription get_snapshot on the same
+    sid ("returns an orderbook_snapshot for the requested market_tickers
+    without modifying the subscription"). The venue's replies follow the
+    documented protocol: `subscribed` names our command, `ok` takes the
+    sid's next seq, the fresh snapshot follows on sid 3."""
     ws = FakeWS([
-        {"type": "subscribed", "msg": {"channel": "orderbook_delta",
-                                       "sid": 3}},
+        {"type": "subscribed", "id": 1,
+         "msg": {"channel": "orderbook_delta", "sid": 3}},
         snap(3, 1, "K-NYY", [["0.43", "100"]], [["0.55", "80"]]),
         delta(3, 3, "K-NYY", "0.44", "5", "yes"),          # gap (2 missing)
-        snap(4, 1, "K-NYY", [["0.47", "10"]], [["0.51", "10"]])])
+        {"type": "ok", "id": 2, "sid": 3, "seq": 4},
+        snap(3, 5, "K-NYY", [["0.47", "10"]], [["0.51", "10"]])])
 
     async def connect():
         return ws
@@ -177,10 +187,11 @@ def test_the_subscriber_resubscribes_after_a_gap_and_waits_for_the_snapshot():
             await sub.session()
     asyncio.run(go())
     cmds = [m["cmd"] for m in ws.sent]
-    assert cmds == ["subscribe", "unsubscribe", "subscribe"]
+    assert cmds == ["subscribe", "update_subscription"]
     assert ws.sent[0]["params"] == {"channels": ["orderbook_delta"],
                                     "market_tickers": ["K-NYY"]}
-    assert ws.sent[1]["params"] == {"sids": [3]}
+    assert ws.sent[1]["params"] == {"sid": 3, "market_tickers": ["K-NYY"],
+                                    "action": "get_snapshot"}
     assert sub.resubscribes == 1 and books.stats["gaps"] == 1
     assert books.stats["snapshots"] == 2
     # the session ended (socket closed): connected != current -> GAP

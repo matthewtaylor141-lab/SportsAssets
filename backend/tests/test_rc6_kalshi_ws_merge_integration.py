@@ -150,17 +150,29 @@ def test_an_ack_after_a_prune_never_brings_a_dropped_market_back():
 
 def test_ix_resubscribe_pending_then_forget_in_the_orderings_harness():
     """_ORDERINGS 'in_flight_after_the_resubscribe_ack' with K-C dropped
-    after the gap, before the resubscribe's ack."""
+    after the gap, before the repair's reply. (RC6.2: the repair is the
+    documented get_snapshot on the same sid -- its `ok` takes the sid's
+    next seq and the fresh snapshots follow on sid 3 -- where it used to be
+    a resubscribe acknowledged as sid 4; the script's venue replies follow
+    the documented protocol, the assertions are the test's own plus: the
+    dropped market is taken out by delete_markets and no later command
+    names it, its late snapshots keep the sid's sequence.)"""
     want = ["K-A", "K-B", "K-C"]
     script = []
     ws, sub, b, seen, ctx, go = drive(script, want)
     ws.script = (list(SEQ._HEAD) + [prune_to(ctx, ["K-A", "K-B"])] + [
-        subscribed(3, 4), snap(4, 1, "K-A"), snap(4, 2, "K-B"),
-        snap(3, 4, "K-C"), snap(4, 3, "K-C"), delta(4, 4, "K-A")])
+        SEQ.ok(2, 3, 4), snap(3, 5, "K-A"), snap(3, 6, "K-B"),
+        snap(3, 7, "K-C"), snap(3, 8, "K-C"), delta(3, 9, "K-A")])
     asyncio.run(go())
     assert ws.violations == []
     assert seen["K-A"]["ok"] and seen["K-B"]["ok"]
     assert seen["_books"] == {"K-A", "K-B"}, seen["_books"]
+    after = [m for m in ws.sent[2:]]
+    assert [(m["cmd"], m["params"].get("action"), m["params"].get(
+        "market_tickers")) for m in after] == [
+        ("update_subscription", "delete_markets", ["K-C"])], ws.sent
+    assert seen["_counts"]["gaps"] == 1
+    assert seen["_counts"]["ignored_not_tracked"] == 2
 
 
 #: every _ORDERINGS script with one market dropped at each of its first
@@ -190,8 +202,15 @@ def test_the_orderings_with_a_drop_anywhere(ordering, drop, pos):
     after = ws.sent[marker["n_sent"]:]
     resub_after = [m["params"]["market_tickers"] for m in after
                    if m["cmd"] == "subscribe"]
+    # (RC6.2) the documented repair and additions are update_subscription
+    # add_markets / get_snapshot on the sid: after its drop the market is
+    # named by none of them either (only by its delete_markets)
+    named_after = [m["params"]["market_tickers"] for m in after
+                   if m["cmd"] == "update_subscription"
+                   and m["params"]["action"] != "delete_markets"]
     assert ws.violations == [], ws.violations
     assert drop not in seen["_books"], (seen["_books"], ws.sent)
     assert all(drop not in r for r in resub_after), resub_after
+    assert all(drop not in r for r in named_after), named_after
     for t in keep:
         assert seen[t]["ok"], (t, seen[t], ws.sent)

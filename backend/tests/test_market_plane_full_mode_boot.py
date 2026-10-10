@@ -379,6 +379,7 @@ OUT["grpc_methods"] = sorted(
         "MarketDataSubscriptionAPI"].methods)
 OUT["kalshi_ws_commands"] = sorted(
     k for k in vars(KWS.Commands) if not k.startswith("_"))
+OUT["kalshi_ws_update_actions"] = sorted(KWS.UPDATE_ACTIONS)
 OUT["process_lock"] = EG.process_lock()
 OUT["order_modules_loaded"] = sorted(
     m for m in G.ORDER_MODULES if m in sys.modules)
@@ -499,7 +500,13 @@ def test_every_submit_cancel_and_funding_path_is_refused_before_the_wire(
     assert out["grpc_services"] == ["MarketDataSubscriptionAPI"]
     assert out["grpc_methods"] == ["BiDirectionalStreamMarketData",
                                    "CreateMarketDataSubscription"]
-    assert out["kalshi_ws_commands"] == ["subscribe", "unsubscribe"]
+    # (RC6.2) the documented command set: ONE subscribe per connection,
+    # then update_subscription (add_markets / delete_markets / get_snapshot)
+    # on its sid; no unsubscribe at all (it was ["subscribe", "unsubscribe"])
+    assert out["kalshi_ws_commands"] == ["subscribe", "update_subscription"]
+    assert out["kalshi_ws_update_actions"] == ["add_markets",
+                                               "delete_markets",
+                                               "get_snapshot"]
     # ZERO such requests reached any mock transport
     assert out["leaked"] == [], out["leaked"]
     assert set(ref.values()) & {"NOT_REFUSED"} == set()
