@@ -1549,3 +1549,21 @@ tests/test_rc62_kalshi_ws_venue_membership.py
 tests/test_rc6_kalshi_ws_acceptance_model.py
 # (rc6.2 kalshi-protocol) the plane-hang storm bound kept as defence in depth: the RC6.1 venue no longer storms (one subscribe, every market named once, no dead sid) and a session whose commands run away is ended by name and reconnected
 tests/test_rc6_kalshi_ws_resubscribe_storm.py
+# (rc6.3 sw-reds-replay, lane H0) THE SOFTWARE-REDS REPLAY HARNESS: the packet hour of RC6.3b (ec8b892d, gate software_reds_zero false, 84 / 14 / 6 / 0 over 104 events, SOFTWARE by code 35 / 1 / 38 / 10) exported from the production read replica (research-sql 38055963121) replays through coverage_first_loss.census and the gate's own evidence derivation to EXACTLY the packet's numbers on the checked-out taxonomy; UNCLASSIFIED == 0 on the hour and on every row of the 24-row hourly readback (research/rc63_sw_reds_census.sql, parameterised by now); no RC6.3b code (PMUS_ROUTE_BOOK_*, KALSHI_SHADOW_*, capability review) is a first loss; the Xavier entry codes classify as the one taxonomy says and the earliest stage wins (the critic's "second wave" measured: 13 masked XAVIER_HELD_READ decisions, none surfacing for the PAPER-1 events); the corrected narrative as numbers (84 written by pinnapi_* 36 / the collector 38 / paper decisions 10; the pure-code floor without COLL-1 is 42-66, not "at most 39"); the research file pinned to its generator and read-only. The two per-lane EXPECTATION cases (xfail until PAPER-1 / FEED-1 land and capture their readback hour) are deliberately NOT listed: an xfail is a reject here, and they must flip, not pass by accident.
+tests/test_rc63_software_reds_replay.py::test_the_fixture_is_the_packet_hour_as_recorded
+tests/test_rc63_software_reds_replay.py::test_the_replay_reproduces_the_packet_gate_evidence_exactly
+tests/test_rc63_software_reds_replay.py::test_the_census_reconciles_and_the_other_classes_are_the_packets
+tests/test_rc63_software_reds_replay.py::test_every_code_the_hour_recorded_is_classified_by_the_two_tables
+tests/test_rc63_software_reds_replay.py::test_the_eighty_four_are_written_by_three_paths_two_of_them_pinnapi_and_paper
+tests/test_rc63_software_reds_replay.py::test_the_quiet_line_and_the_five_no_exact_beside_the_stale_are_as_counted
+tests/test_rc63_software_reds_replay.py::test_the_corrected_floor_is_42_to_66_not_at_most_39
+tests/test_rc63_software_reds_replay.py::test_paper1_projection_is_minus_ten_software_plus_ten_economic
+tests/test_rc63_software_reds_replay.py::test_the_second_wave_is_latent_in_the_hour_and_measured
+tests/test_rc63_software_reds_replay.py::test_feed1_projection_no_exact_events_leave_software_as_external_or_priced
+tests/test_rc63_software_reds_replay.py::test_the_xavier_entry_codes_classify_as_the_one_taxonomy_says
+tests/test_rc63_software_reds_replay.py::test_the_earliest_stage_wins_and_the_second_wave_surfaces_when_it_goes
+tests/test_rc63_software_reds_replay.py::test_the_rc63b_codes_are_known_and_classified
+tests/test_rc63_software_reds_replay.py::test_no_rc63b_code_is_a_first_loss_in_the_packet_hour
+tests/test_rc63_software_reds_replay.py::test_the_hourly_readback_has_24_rows_none_unclassified_and_the_packet_hour_is_84
+tests/test_rc63_software_reds_replay.py::test_the_research_file_is_the_generators_and_read_only
+tests/test_rc63_software_reds_replay.py::test_the_tool_parses_a_run_log_and_a_fixture_alike

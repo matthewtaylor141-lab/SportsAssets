@@ -1,0 +1,3998 @@
+{
+ "version": "RC63_SW_REDS_HOURLY_CENSUS_V1",
+ "census_version": "COVERAGE_FIRST_LOSS_CENSUS_V1",
+ "taxonomy_version": "REFUSAL_TAXONOMY_V1",
+ "rows": [
+  {
+   "k": 0,
+   "now": 1791651274.8284767,
+   "since": 1791647674.8284767,
+   "until": 1791651275.8284767,
+   "events": 231,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 175,
+    "ECONOMIC": 50,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 175,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "PROVIDER",
+     "code": "FEED_SOCKET_CLOSED",
+     "events": 1
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 46
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 38
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 32
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 13
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 10
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 7
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 6
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "events": 1
+    }
+   ],
+   "software_codes_truncated": true,
+   "by_code": [
+    {
+     "stage": "PROVIDER",
+     "code": "FEED_SOCKET_CLOSED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 46,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 38,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 32,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 13,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 10,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 7,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 6,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_FIXTURE_AMBIGUOUS",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 15,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 50,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 1,
+    "NORMALIZED": 49,
+    "MAPPED": 3,
+    "SETTLEMENT": 2,
+    "MODEL": 0,
+    "FAIR_VALUE": 111,
+    "BOOK": 15,
+    "EV": 50,
+    "ENTER_PASS": 0
+   },
+   "valuations": 1211,
+   "decisions": 3481,
+   "valuations_linked": {
+    "by_event_key": 119,
+    "by_venue_contract": 12
+   },
+   "by_competition": {
+    "pinnapi_soccer": 69,
+    "americanfootball_ncaaf": 63,
+    "soccer_usa_mls": 30,
+    "americanfootball_nfl": 26,
+    "pinnapi_basketball": 21,
+    "soccer_mexico_ligamx": 11,
+    "pinnapi_hockey": 6,
+    "baseball_mlb": 3,
+    "soccer_usa_usl_championship": 2
+   }
+  },
+  {
+   "k": 1,
+   "now": 1791647674.8284767,
+   "since": 1791644074.8284767,
+   "until": 1791647675.8284767,
+   "events": 130,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 105,
+    "ECONOMIC": 19,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 105,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 47
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 38
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 14
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 4
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 2
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 47,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 38,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 14,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 4,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 19,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 50,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 58,
+    "BOOK": 0,
+    "EV": 19,
+    "ENTER_PASS": 0
+   },
+   "valuations": 48,
+   "decisions": 144,
+   "valuations_linked": {
+    "by_event_key": 38,
+    "by_venue_contract": 1
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "americanfootball_nfl": 26,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 2,
+   "now": 1791644074.8284767,
+   "since": 1791640474.8284767,
+   "until": 1791644075.8284767,
+   "events": 130,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 103,
+    "ECONOMIC": 21,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 103,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 47
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 33
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 21
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 1
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 47,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 33,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 21,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 21,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 51,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 54,
+    "BOOK": 1,
+    "EV": 21,
+    "ENTER_PASS": 0
+   },
+   "valuations": 60,
+   "decisions": 180,
+   "valuations_linked": {
+    "by_event_key": 41,
+    "by_venue_contract": 2
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "americanfootball_nfl": 26,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 3,
+   "now": 1791640474.8284767,
+   "since": 1791636874.8284767,
+   "until": 1791640475.8284767,
+   "events": 104,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 76,
+    "ECONOMIC": 22,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 76,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 26
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 14
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 1
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 26,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 14,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 22,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 38,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 41,
+    "BOOK": 0,
+    "EV": 22,
+    "ENTER_PASS": 0
+   },
+   "valuations": 75,
+   "decisions": 225,
+   "valuations_linked": {
+    "by_event_key": 35,
+    "by_venue_contract": 2
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 4,
+   "now": 1791636874.8284767,
+   "since": 1791633274.8284767,
+   "until": 1791636875.8284767,
+   "events": 104,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 81,
+    "ECONOMIC": 17,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 81,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 21
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 13
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 8
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 1
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 21,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 13,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 8,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 17,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 38,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 45,
+    "BOOK": 1,
+    "EV": 17,
+    "ENTER_PASS": 0
+   },
+   "valuations": 62,
+   "decisions": 186,
+   "valuations_linked": {
+    "by_event_key": 32,
+    "by_venue_contract": 2
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 5,
+   "now": 1791633274.8284767,
+   "since": 1791629674.8284767,
+   "until": 1791633275.8284767,
+   "events": 104,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 81,
+    "ECONOMIC": 17,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 81,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 29
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 16
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 29,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 16,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 17,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 39,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 45,
+    "BOOK": 0,
+    "EV": 17,
+    "ENTER_PASS": 0
+   },
+   "valuations": 67,
+   "decisions": 201,
+   "valuations_linked": {
+    "by_event_key": 31,
+    "by_venue_contract": 2
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 6,
+   "now": 1791629674.8284767,
+   "since": 1791626074.8284767,
+   "until": 1791629675.8284767,
+   "events": 104,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 85,
+    "ECONOMIC": 13,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 85,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 42
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 6
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 1
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 42,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 6,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 13,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 39,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 48,
+    "BOOK": 1,
+    "EV": 13,
+    "ENTER_PASS": 0
+   },
+   "valuations": 29,
+   "decisions": 87,
+   "valuations_linked": {
+    "by_event_key": 19,
+    "by_venue_contract": 1
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 7,
+   "now": 1791626074.8284767,
+   "since": 1791622474.8284767,
+   "until": 1791626075.8284767,
+   "events": 104,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 84,
+    "ECONOMIC": 14,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 84,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 38
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 10
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 38,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 10,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 14,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 39,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 48,
+    "BOOK": 0,
+    "EV": 14,
+    "ENTER_PASS": 0
+   },
+   "valuations": 42,
+   "decisions": 126,
+   "valuations_linked": {
+    "by_event_key": 23,
+    "by_venue_contract": 1
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 8,
+   "now": 1791622474.8284767,
+   "since": 1791618874.8284767,
+   "until": 1791622475.8284767,
+   "events": 104,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 78,
+    "ECONOMIC": 20,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 78,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 26
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 14
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 1
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 26,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 14,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 20,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 39,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 41,
+    "BOOK": 1,
+    "EV": 20,
+    "ENTER_PASS": 0
+   },
+   "valuations": 68,
+   "decisions": 204,
+   "valuations_linked": {
+    "by_event_key": 34,
+    "by_venue_contract": 2
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 9,
+   "now": 1791618874.8284767,
+   "since": 1791615274.8284767,
+   "until": 1791618875.8284767,
+   "events": 210,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 115,
+    "ECONOMIC": 89,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 115,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 39
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 14
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 7
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 5
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 3
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 9
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 39,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 14,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 7,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 5,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 9,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 89,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 39,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 70,
+    "BOOK": 9,
+    "EV": 89,
+    "ENTER_PASS": 0
+   },
+   "valuations": 1184,
+   "decisions": 3410,
+   "valuations_linked": {
+    "by_event_key": 123,
+    "by_venue_contract": 5
+   },
+   "by_competition": {
+    "pinnapi_soccer": 73,
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 30,
+    "pinnapi_basketball": 24,
+    "soccer_mexico_ligamx": 10,
+    "pinnapi_hockey": 6,
+    "pinnapi_baseball": 3,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 10,
+   "now": 1791615274.8284767,
+   "since": 1791611674.8284767,
+   "until": 1791615275.8284767,
+   "events": 214,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 115,
+    "ECONOMIC": 92,
+    "EXTERNAL": 7,
+    "UNCLASSIFIED": 0
+   },
+   "software": 115,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "PROVIDER",
+     "code": "FEED_SOCKET_CLOSED",
+     "events": 1
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 19
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 12
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 9
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 9
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 7
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 6
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 13
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "PROVIDER",
+     "code": "FEED_SOCKET_CLOSED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 4,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 19,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 12,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 9,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 9,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 7,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 6,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 13,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 92,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 1,
+    "NORMALIZED": 39,
+    "MAPPED": 4,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 65,
+    "BOOK": 13,
+    "EV": 92,
+    "ENTER_PASS": 0
+   },
+   "valuations": 1877,
+   "decisions": 5380,
+   "valuations_linked": {
+    "by_event_key": 135,
+    "by_venue_contract": 8
+   },
+   "by_competition": {
+    "pinnapi_soccer": 77,
+    "americanfootball_ncaaf": 62,
+    "soccer_usa_mls": 31,
+    "pinnapi_basketball": 18,
+    "soccer_mexico_ligamx": 11,
+    "pinnapi_hockey": 6,
+    "pinnapi_baseball": 3,
+    "americanfootball_nfl": 2,
+    "baseball_mlb": 2,
+    "soccer_argentina_primera_nacional": 1,
+    "soccer_uruguay_primera_division": 1
+   }
+  },
+  {
+   "k": 11,
+   "now": 1791611674.8284767,
+   "since": 1791608074.8284767,
+   "until": 1791611675.8284767,
+   "events": 216,
+   "entered": 0,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 110,
+    "ECONOMIC": 99,
+    "EXTERNAL": 7,
+    "UNCLASSIFIED": 0
+   },
+   "software": 110,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 37
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "MAPPED",
+     "code": "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW",
+     "events": 1
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 25
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 14
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 8
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 5
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 4
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "events": 1
+    }
+   ],
+   "software_codes_truncated": true,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 37,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 4,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "external_valuations"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 25,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 14,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 8,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 5,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 4,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 9,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 99,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 41,
+    "MAPPED": 5,
+    "SETTLEMENT": 1,
+    "MODEL": 0,
+    "FAIR_VALUE": 61,
+    "BOOK": 9,
+    "EV": 99,
+    "ENTER_PASS": 0
+   },
+   "valuations": 1845,
+   "decisions": 5356,
+   "valuations_linked": {
+    "by_event_key": 137,
+    "by_venue_contract": 3
+   },
+   "by_competition": {
+    "pinnapi_soccer": 86,
+    "americanfootball_ncaaf": 65,
+    "soccer_usa_mls": 30,
+    "pinnapi_basketball": 14,
+    "soccer_mexico_ligamx": 11,
+    "pinnapi_baseball": 3,
+    "pinnapi_hockey": 3,
+    "baseball_mlb": 2,
+    "americanfootball_nfl": 1,
+    "soccer_argentina_primera_nacional": 1
+   }
+  },
+  {
+   "k": 12,
+   "now": 1791608074.8284767,
+   "since": 1791604474.8284767,
+   "until": 1791608075.8284767,
+   "events": 179,
+   "entered": 1,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 95,
+    "ECONOMIC": 76,
+    "EXTERNAL": 7,
+    "UNCLASSIFIED": 0
+   },
+   "software": 95,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 39
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 17
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 13
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 8
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 6
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 7
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 39,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 4,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 17,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 13,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 8,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 6,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 7,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 76,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 43,
+    "MAPPED": 4,
+    "SETTLEMENT": 1,
+    "MODEL": 0,
+    "FAIR_VALUE": 47,
+    "BOOK": 7,
+    "EV": 76,
+    "ENTER_PASS": 0
+   },
+   "valuations": 590,
+   "decisions": 1742,
+   "valuations_linked": {
+    "by_event_key": 103,
+    "by_venue_contract": 6
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 70,
+    "pinnapi_soccer": 49,
+    "soccer_usa_mls": 30,
+    "pinnapi_basketball": 11,
+    "soccer_mexico_ligamx": 11,
+    "pinnapi_baseball": 3,
+    "baseball_mlb": 2,
+    "pinnapi_hockey": 2,
+    "americanfootball_nfl": 1
+   }
+  },
+  {
+   "k": 13,
+   "now": 1791604474.8284767,
+   "since": 1791600874.8284767,
+   "until": 1791604475.8284767,
+   "events": 111,
+   "entered": 1,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 76,
+    "ECONOMIC": 23,
+    "EXTERNAL": 11,
+    "UNCLASSIFIED": 0
+   },
+   "software": 76,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 37
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 25
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 10
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 1
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 37,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 4,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 25,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 10,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+     "class": "EXTERNAL",
+     "events": 4,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 22,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "SETTLEMENT_DIFFERENCE_PRICED_VALUE_IS_ZERO",
+     "class": "ECONOMIC",
+     "events": 1,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 41,
+    "MAPPED": 4,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 37,
+    "BOOK": 5,
+    "EV": 23,
+    "ENTER_PASS": 0
+   },
+   "valuations": 77,
+   "decisions": 226,
+   "valuations_linked": {
+    "by_event_key": 34,
+    "by_venue_contract": 3
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 68,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 11,
+    "baseball_mlb": 2
+   }
+  },
+  {
+   "k": 14,
+   "now": 1791600874.8284767,
+   "since": 1791597274.8284767,
+   "until": 1791600875.8284767,
+   "events": 150,
+   "entered": 11,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 74,
+    "ECONOMIC": 59,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 74,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 36
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 18
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 9
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 5
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 36,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "external_valuations"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 18,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 9,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 5,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 59,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 40,
+    "MAPPED": 3,
+    "SETTLEMENT": 1,
+    "MODEL": 0,
+    "FAIR_VALUE": 31,
+    "BOOK": 5,
+    "EV": 59,
+    "ENTER_PASS": 0
+   },
+   "valuations": 598,
+   "decisions": 1709,
+   "valuations_linked": {
+    "by_event_key": 85,
+    "by_venue_contract": 4
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 69,
+    "soccer_usa_mls": 30,
+    "pinnapi_soccer": 19,
+    "soccer_mexico_ligamx": 11,
+    "pinnapi_hockey": 9,
+    "pinnapi_basketball": 5,
+    "baseball_mlb": 2,
+    "soccer_usa_usl_championship": 2,
+    "pinnapi_baseball": 1,
+    "soccer_colombia_primera_a": 1,
+    "soccer_uruguay_primera_division": 1
+   }
+  },
+  {
+   "k": 15,
+   "now": 1791597274.8284767,
+   "since": 1791593674.8284767,
+   "until": 1791597275.8284767,
+   "events": 155,
+   "entered": 19,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 91,
+    "ECONOMIC": 38,
+    "EXTERNAL": 7,
+    "UNCLASSIFIED": 0
+   },
+   "software": 91,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "PROVIDER",
+     "code": "FEED_SOCKET_CLOSED",
+     "events": 1
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 35
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 35
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 4
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 3
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 3
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 6
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "PROVIDER",
+     "code": "FEED_SOCKET_CLOSED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 35,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 4,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 6,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+     "class": "EXTERNAL",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 38,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 1,
+    "NORMALIZED": 39,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 48,
+    "BOOK": 7,
+    "EV": 38,
+    "ENTER_PASS": 0
+   },
+   "valuations": 1216,
+   "decisions": 3496,
+   "valuations_linked": {
+    "by_event_key": 67,
+    "by_venue_contract": 10
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 72,
+    "soccer_usa_mls": 30,
+    "pinnapi_soccer": 18,
+    "soccer_mexico_ligamx": 12,
+    "pinnapi_hockey": 11,
+    "pinnapi_basketball": 6,
+    "baseball_mlb": 2,
+    "soccer_usa_usl_championship": 2,
+    "pinnapi_baseball": 1,
+    "soccer_colombia_primera_a": 1
+   }
+  },
+  {
+   "k": 16,
+   "now": 1791593674.8284767,
+   "since": 1791590074.8284767,
+   "until": 1791593675.8284767,
+   "events": 166,
+   "entered": 17,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 92,
+    "ECONOMIC": 50,
+    "EXTERNAL": 7,
+    "UNCLASSIFIED": 0
+   },
+   "software": 92,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 34
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 31
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 7
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 3
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 12
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 34,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 31,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 7,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 12,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "VENUE_BOOK_READ_RETURNED_ERROR",
+     "class": "EXTERNAL",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 50,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 38,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 45,
+    "BOOK": 13,
+    "EV": 50,
+    "ENTER_PASS": 0
+   },
+   "valuations": 1323,
+   "decisions": 3781,
+   "valuations_linked": {
+    "by_event_key": 85,
+    "by_venue_contract": 8
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 70,
+    "soccer_usa_mls": 30,
+    "pinnapi_soccer": 24,
+    "pinnapi_hockey": 13,
+    "pinnapi_basketball": 10,
+    "soccer_mexico_ligamx": 10,
+    "baseball_mlb": 2,
+    "soccer_colombia_primera_a": 2,
+    "soccer_uruguay_primera_division": 2,
+    "pinnapi_baseball": 1,
+    "soccer_argentina_primera_nacional": 1,
+    "soccer_usa_usl_championship": 1
+   }
+  },
+  {
+   "k": 17,
+   "now": 1791590074.8284767,
+   "since": 1791586474.8284767,
+   "until": 1791590075.8284767,
+   "events": 166,
+   "entered": 12,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 83,
+    "ECONOMIC": 64,
+    "EXTERNAL": 7,
+    "UNCLASSIFIED": 0
+   },
+   "software": 83,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 33
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 24
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 9
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 6
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 3
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 2
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 5
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 33,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 24,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 9,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 6,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 5,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "VENUE_BOOK_READ_RETURNED_ERROR",
+     "class": "EXTERNAL",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 64,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 37,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 44,
+    "BOOK": 6,
+    "EV": 64,
+    "ENTER_PASS": 0
+   },
+   "valuations": 1450,
+   "decisions": 4196,
+   "valuations_linked": {
+    "by_event_key": 91,
+    "by_venue_contract": 4
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 69,
+    "pinnapi_soccer": 30,
+    "soccer_usa_mls": 30,
+    "pinnapi_hockey": 11,
+    "soccer_mexico_ligamx": 11,
+    "pinnapi_basketball": 6,
+    "soccer_usa_usl_championship": 3,
+    "americanfootball_nfl": 2,
+    "soccer_colombia_primera_a": 2,
+    "pinnapi_baseball": 1,
+    "soccer_uruguay_primera_division": 1
+   }
+  },
+  {
+   "k": 18,
+   "now": 1791586474.8284767,
+   "since": 1791582874.8284767,
+   "until": 1791586475.8284767,
+   "events": 170,
+   "entered": 6,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 72,
+    "ECONOMIC": 86,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 72,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 33
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 16
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 10
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 6
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 33,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 16,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 10,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 6,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 86,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 37,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 32,
+    "BOOK": 6,
+    "EV": 86,
+    "ENTER_PASS": 0
+   },
+   "valuations": 803,
+   "decisions": 2363,
+   "valuations_linked": {
+    "by_event_key": 112,
+    "by_venue_contract": 8
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 69,
+    "pinnapi_soccer": 39,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 10,
+    "pinnapi_basketball": 7,
+    "pinnapi_hockey": 7,
+    "americanfootball_nfl": 4,
+    "soccer_usa_usl_championship": 2,
+    "soccer_colombia_primera_a": 1,
+    "soccer_uruguay_primera_division": 1
+   }
+  },
+  {
+   "k": 19,
+   "now": 1791582874.8284767,
+   "since": 1791579274.8284767,
+   "until": 1791582875.8284767,
+   "events": 168,
+   "entered": 10,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 78,
+    "ECONOMIC": 72,
+    "EXTERNAL": 8,
+    "UNCLASSIFIED": 0
+   },
+   "software": 78,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 33
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 27
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 10
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 3
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 4
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 33,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 27,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 10,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 4,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+     "class": "EXTERNAL",
+     "events": 2,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 72,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 36,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 41,
+    "BOOK": 6,
+    "EV": 72,
+    "ENTER_PASS": 0
+   },
+   "valuations": 591,
+   "decisions": 1744,
+   "valuations_linked": {
+    "by_event_key": 95,
+    "by_venue_contract": 5
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 69,
+    "pinnapi_soccer": 34,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 11,
+    "pinnapi_hockey": 10,
+    "pinnapi_basketball": 8,
+    "soccer_uruguay_primera_division": 3,
+    "americanfootball_nfl": 1,
+    "soccer_colombia_primera_a": 1,
+    "soccer_usa_usl_championship": 1
+   }
+  },
+  {
+   "k": 20,
+   "now": 1791579274.8284767,
+   "since": 1791575674.8284767,
+   "until": 1791579275.8284767,
+   "events": 124,
+   "entered": 4,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 105,
+    "ECONOMIC": 9,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 105,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 33
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 46
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 10
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 6
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 3
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 33,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 2,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP",
+     "class": "EXTERNAL",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "SETTLEMENT",
+     "code": "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "external_valuations"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 46,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 10,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 6,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 9,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 36,
+    "MAPPED": 3,
+    "SETTLEMENT": 2,
+    "MODEL": 0,
+    "FAIR_VALUE": 67,
+    "BOOK": 3,
+    "EV": 9,
+    "ENTER_PASS": 0
+   },
+   "valuations": 116,
+   "decisions": 293,
+   "valuations_linked": {
+    "by_event_key": 33,
+    "by_venue_contract": 5
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 69,
+    "soccer_usa_mls": 30,
+    "pinnapi_soccer": 9,
+    "soccer_mexico_ligamx": 9,
+    "pinnapi_basketball": 6,
+    "soccer_uruguay_primera_division": 1
+   }
+  },
+  {
+   "k": 21,
+   "now": 1791575674.8284767,
+   "since": 1791572074.8284767,
+   "until": 1791575675.8284767,
+   "events": 108,
+   "entered": 1,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 88,
+    "ECONOMIC": 13,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 88,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 33
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 25
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 19
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 8
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 2
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 33,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 2,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP",
+     "class": "EXTERNAL",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 25,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 19,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 8,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 13,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 36,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 53,
+    "BOOK": 2,
+    "EV": 13,
+    "ENTER_PASS": 0
+   },
+   "valuations": 38,
+   "decisions": 114,
+   "valuations_linked": {
+    "by_event_key": 24,
+    "by_venue_contract": 1
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 69,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 9
+   }
+  },
+  {
+   "k": 22,
+   "now": 1791572074.8284767,
+   "since": 1791568474.8284767,
+   "until": 1791572075.8284767,
+   "events": 108,
+   "entered": 1,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 92,
+    "ECONOMIC": 9,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 92,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 33
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 24
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 20
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 9
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 2
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 2
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 33,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 2,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP",
+     "class": "EXTERNAL",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 24,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 20,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 9,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 9,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 36,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 57,
+    "BOOK": 2,
+    "EV": 9,
+    "ENTER_PASS": 0
+   },
+   "valuations": 52,
+   "decisions": 156,
+   "valuations_linked": {
+    "by_event_key": 23,
+    "by_venue_contract": 2
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 69,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 9
+   }
+  },
+  {
+   "k": 23,
+   "now": 1791568474.8284767,
+   "since": 1791564874.8284767,
+   "until": 1791568475.8284767,
+   "events": 159,
+   "entered": 12,
+   "unavailable": 0,
+   "by_class": {
+    "SOFTWARE": 123,
+    "ECONOMIC": 18,
+    "EXTERNAL": 6,
+    "UNCLASSIFIED": 0
+   },
+   "software": 123,
+   "unclassified": 0,
+   "software_by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 33
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "events": 49
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 10
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 9
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "events": 4
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 3
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "events": 1
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "events": 11
+    }
+   ],
+   "software_codes_truncated": false,
+   "by_code": [
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 33,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "NORMALIZED",
+     "code": "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
+     "class": "EXTERNAL",
+     "events": 3,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_CONTRACT_FOR_EVENT",
+     "class": "EXTERNAL",
+     "events": 2,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "MAPPED",
+     "code": "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP",
+     "class": "EXTERNAL",
+     "events": 1,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "QUOTE_STALE_ON_ARRIVAL",
+     "class": "SOFTWARE",
+     "events": 49,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "class": "SOFTWARE",
+     "events": 10,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "class": "SOFTWARE",
+     "events": 9,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_EVIDENCE_STALE",
+     "class": "SOFTWARE",
+     "events": 4,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+     "class": "SOFTWARE",
+     "events": 2,
+     "source": "ext_candidate_outcomes"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "BOOK",
+     "code": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
+     "class": "SOFTWARE",
+     "events": 11,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "BELOW_MIN_GROSS_EDGE",
+     "class": "ECONOMIC",
+     "events": 18,
+     "source": "paper_decisions"
+    }
+   ],
+   "first_loss": {
+    "PROVIDER": 0,
+    "NORMALIZED": 36,
+    "MAPPED": 3,
+    "SETTLEMENT": 0,
+    "MODEL": 0,
+    "FAIR_VALUE": 79,
+    "BOOK": 11,
+    "EV": 18,
+    "ENTER_PASS": 0
+   },
+   "valuations": 674,
+   "decisions": 1843,
+   "valuations_linked": {
+    "by_event_key": 66,
+    "by_venue_contract": 3
+   },
+   "by_competition": {
+    "americanfootball_ncaaf": 69,
+    "pinnapi_soccer": 40,
+    "soccer_usa_mls": 30,
+    "soccer_mexico_ligamx": 9,
+    "pinnapi_hockey": 7,
+    "pinnapi_baseball": 2,
+    "pinnapi_basketball": 2
+   }
+  }
+ ]
+}
