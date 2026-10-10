@@ -1829,6 +1829,16 @@ INLINE = {
     # own health record and heartbeat
     "PAPER_STEP_EXCEEDED_PASS_TIME": (S, INT, "AGENT_EVALUATION"),
     "PAPER_STEP_SKIPPED_PASS_TIME_SPENT": (S, CAP, "AGENT_EVALUATION"),
+    # (rc6.3c pass-hardening) a step that can owe an ENTER is not started
+    # with less pass time than the most an owed ENTER can run past its cut
+    # (paper_derek.owed_enter_overrun_bound_s) plus the minimum start; a step
+    # that left a transaction open or aborted had it rolled back and named;
+    # a step whose own result reports an error it handled itself (the
+    # coverage step) is named in the pass errors
+    "PAPER_STEP_NOT_STARTED_ENTER_OVERRUN_WOULD_EXCEED_RESERVE": (
+        S, CAP, "AGENT_EVALUATION"),
+    "PAPER_STEP_LEFT_A_TRANSACTION_OPEN": (S, INT, "AGENT_EVALUATION"),
+    "PAPER_STEP_RETURNED_AN_ERROR": (S, INT, "AGENT_EVALUATION"),
     # (rc6.3b pass-stall) the coverage step's own bounded outcomes: its run
     # cut at its budget or raised (the watermark still advances, so it backs
     # off for REFRESH_EVERY_S), given no pass time to run in, and snapshots

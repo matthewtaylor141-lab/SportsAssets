@@ -7,7 +7,10 @@ PAPER_SESSION=on and the database control row are on
 (`bettor_paper_session.enablement`). It never holds the funded execution
 lock, never blocks Xavier's funded servicing or the collection cycle, and is
 BOUNDED: the steps check a monotonic deadline (the session config's
-`cadence.pass_budget_s`) and the runtime hook adds a hard timeout.
+`cadence.pass_budget_s`), each step is cut at the pass time left for steps,
+and the runtime hook adds a hard timeout as the last resort. What that bound
+guarantees -- and what it does not -- is stated exactly under "THE PASS'S
+RECORD IS KEPT WHEN A STEP IS CUT" below.
 
 ONE PASS AT A TIME, ACROSS TASKS AND PROCESSES: a process-level lock and a
 Postgres advisory lock; a pass that finds either held returns BUSY and does
@@ -406,7 +409,7 @@ def default_steps() -> list:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# THE PASS ALWAYS RECORDS ITSELF (RC6.3b)
+# THE PASS'S RECORD IS KEPT WHEN A STEP IS CUT (RC6.3b; stated exactly below)
 # ═════════════════════════════════════════════════════════════════════
 #
 # PRODUCTION, 2026-10-10 02:17Z onward: every pass was cut by HARD_TIMEOUT_S
@@ -417,19 +420,58 @@ def default_steps() -> list:
 # "ran=false, TimeoutError" with no step named. One step could erase the
 # pass's own record, and nothing said which step it was or what did not run.
 #
-# NO SINGLE STEP CAN NOW PREVENT THE PASS FROM RECORDING ITSELF. Every step
-# is bounded by the pass time that is left -- HARD_TIMEOUT_S less a fixed
-# reserve kept for the record (PASS_RECORD_RESERVE_S; HARD_TIMEOUT_S itself
-# is not raised). A step that runs past that bound is CANCELLED (asyncpg
-# cancels the server-side query), recorded in `errors` under the step's name
-# with R_STEP_EXCEEDED, and the connection is put back to a clean state (a
-# transaction the step opened does not stay open). Every step after the point
-# where the time is spent is recorded as SKIPPED by name with R_STEP_SKIPPED
-# -- in `errors` and in `skipped_steps` -- instead of silently not running.
-# The step order and every step's semantics are unchanged: nothing is
-# reordered, and a step that ends in time behaves exactly as before. The pass
-# then records paper_session_health and the heartbeat normally (ran=true, the
-# errors visible), and the advisory lock is released.
+# WHAT IS GUARANTEED, AND WHAT IS NOT (RC6.3c pass-hardening rewords the
+# RC6.3b claim "no single step can prevent the pass from recording itself",
+# which was wider than what the code does).
+#
+# Every step is bounded by the pass time that is left -- HARD_TIMEOUT_S less a
+# fixed reserve kept for the record (PASS_RECORD_RESERVE_S; HARD_TIMEOUT_S
+# itself is not raised). A step that runs past that bound is CANCELLED
+# (asyncpg cancels the server-side query), recorded in `errors` under the
+# step's name with R_STEP_EXCEEDED, and the connection is put back to a clean
+# state. Every step after the point where the time is spent is recorded as
+# SKIPPED by name with R_STEP_SKIPPED -- in `errors` and in `skipped_steps` --
+# instead of silently not running. The step order and every step's semantics
+# are unchanged. The pass then records paper_session_health and the heartbeat
+# (ran=true, the errors visible) and the advisory lock is released.
+#
+# THAT HOLDS FOR A STEP THAT ENDS WHEN IT IS CANCELLED. Three things are
+# outside it, and each is bounded or named, not ignored:
+#
+#  * AN OWED ENTER. A step that can owe an ENTER (ENTER_OWING_STEPS) runs its
+#    ENTER's order sequence shielded (paper_derek.owed_order), so a cut does
+#    not return at once: the sequence runs on for up to
+#    paper_derek.owed_enter_overrun_bound_s() (15 + 3 x 5 + 2 x 1 = 32 s with
+#    the defaults, every bound spent in full) so that the ENTER ends in an
+#    order or a named abandonment. Such a step is therefore cut that much
+#    EARLIER (at the steps' bound less the overrun bound), and is not STARTED
+#    with less than the overrun bound (plus STEP_MIN_START_S) left for steps:
+#    it is recorded skipped by name with R_STEP_NOT_STARTED_ENTER_OVERRUN.
+#    The guarantee is: the step has returned by the steps' bound, so the
+#    record keeps its whole reserve -- as long as the overrun stays inside
+#    owed_enter_overrun_bound_s(), which is Derek's own published bound. (A
+#    sequence that outlives even that has the pass connection TERMINATED by
+#    paper_derek -- the record cannot be written on it: outside the
+#    guarantee, and the ENTER is left to the backstop to name.)
+#  * A STEP THAT DOES NOT END ON CANCELLATION (it swallows the cancel, or
+#    keeps work running on the pass connection in a shielded task, or blocks
+#    the event loop). The per-step bound cannot end it; HARD_TIMEOUT_S, in
+#    run_once, is the last resort and cuts the WHOLE pass: no
+#    paper_session_health row, and the heartbeat says `ran=false` and names
+#    the step in flight and the steps that had ended.
+#  * THE RECORD ITSELF. paper_session_health's write is bounded by what is
+#    left of HARD_TIMEOUT_S; a record that hangs is a named HEALTH error.
+#
+# AFTER EVERY STEP (not only a cut one) the pass looks at its connection: a
+# transaction the step left open, or aborted, is rolled back and named
+# (R_STEP_LEFT_TRANSACTION), so the record never fails with
+# InFailedSQLTransactionError and a leaked transaction -- whose uncommitted
+# writes, and those of every later step and the record, would have been lost
+# at the final rollback -- is never silent. A step whose own result carries an
+# error it handled itself (the coverage step: COVERAGE_RUN_EXCEEDED_ITS_BUDGET,
+# COVERAGE_RUN_FAILED, an unreadable watermark, a window that could not be
+# written) is also named in the pass `errors` (R_STEP_RETURNED_ERROR), so
+# paper_session_health.errors counts it; the step's own result is unchanged.
 
 #: pass time kept for the record (S.record_pass and the lock release): no
 #: step may run into it
@@ -443,12 +485,54 @@ CONNECTION_RESET_TIMEOUT_S = 5.0
 LOCK_RELEASE_MARGIN_S = 1.0
 R_STEP_EXCEEDED = "PAPER_STEP_EXCEEDED_PASS_TIME"
 R_STEP_SKIPPED = "PAPER_STEP_SKIPPED_PASS_TIME_SPENT"
+R_STEP_NOT_STARTED_ENTER_OVERRUN = (
+    "PAPER_STEP_NOT_STARTED_ENTER_OVERRUN_WOULD_EXCEED_RESERVE")
+R_STEP_LEFT_TRANSACTION = "PAPER_STEP_LEFT_A_TRANSACTION_OPEN"
+R_STEP_RETURNED_ERROR = "PAPER_STEP_RETURNED_AN_ERROR"
+
+#: THE DEFAULT STEPS THAT CAN OWE AN ENTER: each decides valuations and, on an
+#: ENTER, runs the ENTER's row and paper order as an owed sequence
+#: (paper_derek.owed_order) that a cut does not stop at once. `derek` is
+#: PD.step; `benchmark` and `benchmark_completed_game` are PB.step on their
+#: policies; `maker_entry` and `exploration` are PB.step with the maker /
+#: exploration decision functions. NOT in it, by what they do: `cash_fallback`
+#: only records CASH rows for strategies that entered nothing (it opens no
+#: ENTER), `simulate_after_delay` only reads books and simulates fills of
+#: orders that exist, `enter_backstop` only names an ENTER that has no order,
+#: `maker_maintain` only re-checks standing orders for cancellation, and
+#: `xavier` places protective / sale orders on positions already held. A new
+#: step that calls paper_derek.owed_order or bounded_decision belongs here
+#: (tests/test_rc63c_pass_hardening.py fails until it is).
+ENTER_OWING_STEPS = frozenset({
+    "derek", "benchmark", "benchmark_completed_game", "maker_entry",
+    "exploration"})
+
+#: steps whose own result reports an error the step handled itself (it never
+#: raises): named in the pass `errors` as well (see `_returned_error`)
+RESULT_ERROR_STEPS = frozenset({"audrey_coverage"})
 
 
 def pass_steps_deadline(t0: float) -> float:
     """The monotonic instant by which every step must have ended: the pass's
     start plus HARD_TIMEOUT_S less the record's reserve."""
     return float(t0) + float(HARD_TIMEOUT_S) - float(PASS_RECORD_RESERVE_S)
+
+
+def enter_overrun_holdback_s() -> float:
+    """The pass time an ENTER-owing step is cut short by: the most an owed
+    ENTER can hold its caller past the caller's own cancellation
+    (paper_derek.owed_enter_overrun_bound_s). 0.0 when paper_derek cannot be
+    imported (then no ENTER-owing step exists either)."""
+    try:
+        from . import paper_derek as _PD
+        return float(_PD.owed_enter_overrun_bound_s())
+    except ImportError:
+        return 0.0
+
+
+def owes_enter(name: str) -> bool:
+    """Whether a step of this name can owe an ENTER (ENTER_OWING_STEPS)."""
+    return name in ENTER_OWING_STEPS
 
 
 def _in_transaction(conn) -> bool:
@@ -458,20 +542,54 @@ def _in_transaction(conn) -> bool:
         return False
 
 
+async def _end_open_transaction(conn, *, was_in_tx: bool
+                                ) -> tuple[bool, str | None]:
+    """Roll back a transaction the step opened and did not close (open or
+    aborted). A transaction the CALLER held before the pass is not the pass's
+    to end. Returns (whether one was rolled back, the problem by name or
+    None)."""
+    ended = False
+    try:
+        async with asyncio.timeout(CONNECTION_RESET_TIMEOUT_S):
+            if _in_transaction(conn) and not was_in_tx:
+                await conn.execute("ROLLBACK")
+                ended = True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        return ended, "%s: %s" % (type(exc).__name__, str(exc)[:160])
+    return ended, None
+
+
 async def _reset_after_cut(conn, *, was_in_tx: bool) -> str | None:
     """Put the pass connection back after a step was cancelled: a transaction
     the step opened and did not close is rolled back (asyncpg has already
     cancelled the statement). A transaction the CALLER held before the pass
     is not the pass's to end. None when clean, else the problem, by name."""
-    try:
-        async with asyncio.timeout(CONNECTION_RESET_TIMEOUT_S):
-            if _in_transaction(conn) and not was_in_tx:
-                await conn.execute("ROLLBACK")
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:                                   # noqa: BLE001
-        return "%s: %s" % (type(exc).__name__, str(exc)[:160])
-    return None
+    return (await _end_open_transaction(conn, was_in_tx=was_in_tx))[1]
+
+
+def _returned_error(name: str, result) -> str | None:
+    """The error a step's OWN RESULT reports (RESULT_ERROR_STEPS), or None.
+    The coverage step never raises: a run cut at its budget or failed comes
+    back as {"error": R_RUN_TIMED_OUT | R_RUN_FAILED | "<Exc>: ..", "why":
+    ..}, a window that could not be written as {"errors": {window: ..}}. A
+    step that is merely not due (`why` NOT_DUE, backed_off) reports none."""
+    if name not in RESULT_ERROR_STEPS or not isinstance(result, dict):
+        return None
+    parts = []
+    err = result.get("error")
+    if err:
+        why = result.get("why")
+        parts.append(str(why) if why and str(why).startswith(str(err))
+                     else "%s (%s)" % (err, why) if why else str(err))
+    errs = result.get("errors")
+    if isinstance(errs, dict) and errs:
+        parts.append("window errors: " + "; ".join(
+            "%s=%s" % (k, v) for k, v in list(errs.items())[:5]))
+    if not parts:
+        return None
+    return ("%s: %s" % (R_STEP_RETURNED_ERROR, " | ".join(parts)))[:400]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -553,6 +671,43 @@ def _skipped(out: dict, name: str, *, left: float) -> None:
         R_STEP_SKIPPED, max(0.0, left))
 
 
+def _not_started_enter_overrun(out: dict, name: str, *, left: float,
+                               holdback: float) -> None:
+    """A step that can owe an ENTER was not started because the pass time left
+    for steps does not cover the most an owed ENTER can run past its cut
+    (`holdback`) plus STEP_MIN_START_S: started, a late ENTER would run into
+    the time kept for the record. Named, in `skipped_steps` and in `errors`."""
+    out["skipped_steps"][name] = R_STEP_NOT_STARTED_ENTER_OVERRUN
+    out["errors"][name] = (
+        "%s: %.1fs of pass time left for steps, %.1fs of it held back for an "
+        "owed ENTER (paper_derek.owed_enter_overrun_bound_s) and at least "
+        "%.1fs needed to start" % (R_STEP_NOT_STARTED_ENTER_OVERRUN,
+                                   max(0.0, left), holdback,
+                                   STEP_MIN_START_S))
+
+
+async def _check_connection_after_step(conn, out: dict, name: str, *,
+                                       was_in_tx: bool) -> None:
+    """AFTER ANY STEP, CUT OR NOT: a transaction it left open or aborted is
+    rolled back and NAMED -- under the step's own name in `errors`, next to
+    the step's own error if it has one. Without it the next step ran inside
+    the leaked transaction and the record (or an aborted transaction's first
+    statement) failed with InFailedSQLTransactionError, or its writes were
+    lost silently at the final rollback. A transaction the caller held
+    before the pass is not the pass's to end."""
+    ended, problem = await _end_open_transaction(conn, was_in_tx=was_in_tx)
+    if not ended and not problem:
+        return
+    note = ("%s: the step ended with a transaction open or aborted; it was "
+            "%s" % (R_STEP_LEFT_TRANSACTION,
+                    "rolled back (its uncommitted writes were not kept)"
+                    if ended else "NOT rolled back"))
+    prev = out["errors"].get(name)
+    out["errors"][name] = note if not prev else "%s | %s" % (prev, note)
+    if problem:
+        out["errors"]["CONNECTION_RESET"] = problem
+
+
 async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
                fee_fn, cycle, live_clock=False, sleep=None, progress=None,
                was_in_tx=False) -> dict:
@@ -591,12 +746,16 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
     # recorded anywhere -- 27.7 s / 36.4 s passes with nothing held could
     # not be attributed. Record only.
     out["step_elapsed_s"] = {}
-    # THE PASS ALWAYS RECORDS ITSELF: every step ends by `steps_end`, the
-    # pass's start plus HARD_TIMEOUT_S less the record's reserve
+    # EVERY STEP IS BOUNDED BY `steps_end`, the pass's start plus
+    # HARD_TIMEOUT_S less the record's reserve (an ENTER-owing step by that
+    # less the owed-ENTER overrun bound, below)
     steps_end = pass_steps_deadline(t0)
+    holdback_s = enter_overrun_holdback_s()
     out["pass_time"] = {"hard_timeout_s": float(HARD_TIMEOUT_S),
                         "record_reserve_s": float(PASS_RECORD_RESERVE_S),
-                        "steps_bound_s": round(steps_end - t0, 3)}
+                        "steps_bound_s": round(steps_end - t0, 3),
+                        "enter_owing_steps_bound_s": round(
+                            steps_end - t0 - holdback_s, 3)}
     out["skipped_steps"] = {}
     out["exceeded_step"] = None
     prog = progress if progress is not None else {}
@@ -608,13 +767,25 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
         if left < STEP_MIN_START_S:
             _skipped(out, name, left=left)
             continue
+        # A STEP THAT CAN OWE AN ENTER IS CUT EARLIER, BY THE MOST AN OWED
+        # ENTER CAN RUN PAST ITS CUT (paper_derek.owed_enter_overrun_bound_s):
+        # its order sequence is shielded, so the cut does not return at once,
+        # and an overrun past `steps_end` would run into the record's reserve
+        # and take the whole pass with it (HARD_TIMEOUT_S). With too little
+        # time for that it is not started, and named.
+        holdback = holdback_s if owes_enter(name) else 0.0
+        room = left - holdback
+        if holdback and room < STEP_MIN_START_S:
+            _not_started_enter_overrun(out, name, left=left,
+                                       holdback=holdback)
+            continue
         # the step may read how long it has (a step that has its own budget
         # ends before it is cut, and so can still write its own watermark)
-        ctx["step_deadline"] = time.monotonic() + left
+        ctx["step_deadline"] = time.monotonic() + room
         prog["step"] = name
         step_in_tx = _in_transaction(conn)
         t_step = time.monotonic()
-        bound = asyncio.timeout(left)
+        bound = asyncio.timeout(room)
         cut = False
         try:
             async with bound:
@@ -633,9 +804,11 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
                 out["errors"][name] = (
                     "%s: cancelled after %.1fs of the %.1fs pass time left "
                     "for steps (HARD_TIMEOUT_S %.0fs less %.0fs kept for the "
-                    "record)" % (R_STEP_EXCEEDED, time.monotonic() - t_step,
-                                 left, float(HARD_TIMEOUT_S),
-                                 float(PASS_RECORD_RESERVE_S)))
+                    "record%s)" % (
+                        R_STEP_EXCEEDED, time.monotonic() - t_step, room,
+                        float(HARD_TIMEOUT_S), float(PASS_RECORD_RESERVE_S),
+                        (" and %.0fs held back for an owed ENTER" % holdback)
+                        if holdback else ""))
             else:
                 out["errors"][name] = "%s: %s" % (type(exc).__name__,
                                                   str(exc)[:200])
@@ -645,8 +818,13 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
                 out["errors"][name] = (
                     "%s: returned after %.1fs, past the %.1fs pass time "
                     "left for steps" % (R_STEP_EXCEEDED,
-                                        time.monotonic() - t_step, left))
+                                        time.monotonic() - t_step, room))
                 cut = True
+            else:
+                # a step that handled its own error and says so in its result
+                returned = _returned_error(name, out["steps"].get(name))
+                if returned:
+                    out["errors"][name] = returned
         if cut:
             out["exceeded_step"] = out["exceeded_step"] or name
         out["step_elapsed_s"][name] = round(time.monotonic() - t_step, 3)
@@ -657,6 +835,12 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
             problem = await _reset_after_cut(conn, was_in_tx=step_in_tx)
             if problem:
                 out["errors"]["CONNECTION_RESET"] = problem
+        else:
+            # ... and after a step that was not cut, the same look at the
+            # connection: a transaction it left open or aborted is ended
+            # and named
+            await _check_connection_after_step(conn, out, name,
+                                               was_in_tx=step_in_tx)
         # A HELD MARKET THAT MOVED WHILE THIS PASS RUNS is reviewed now,
         # between steps, not after the pass (SW-2; see HELD_IN_PASS_MAX_S) --
         # and only in the pass time that is left
@@ -712,7 +896,12 @@ def describe() -> dict:
             "advisory_lock_key": ADVISORY_LOCK_KEY,
             "hard_timeout_s": HARD_TIMEOUT_S,
             "record_reserve_s": PASS_RECORD_RESERVE_S,
-            "steps_bound_s": HARD_TIMEOUT_S - PASS_RECORD_RESERVE_S}
+            "steps_bound_s": HARD_TIMEOUT_S - PASS_RECORD_RESERVE_S,
+            "enter_owing_steps": sorted(ENTER_OWING_STEPS),
+            "enter_overrun_holdback_s": enter_overrun_holdback_s(),
+            "enter_owing_steps_bound_s": (
+                HARD_TIMEOUT_S - PASS_RECORD_RESERVE_S
+                - enter_overrun_holdback_s())}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -2119,6 +2308,22 @@ async def _bounded_checkpoint(conn, ctx: dict, out: dict,
         problem = await _reset_after_cut(conn, was_in_tx=in_tx)
         if problem:
             out["errors"]["CONNECTION_RESET"] = problem
+    else:
+        # the same look at the connection as after a step: a transaction the
+        # checkpoint left open would carry into the next step
+        ended, problem = await _end_open_transaction(conn, was_in_tx=in_tx)
+        if ended or problem:
+            rec = out.setdefault("held_in_pass", dict(
+                {k: 0 for k in HELD_IN_PASS_COUNTS}, checkpoints=0,
+                elapsed_s=0.0, pass_deadline_moved_s=0.0, capped=False,
+                errors=[]))
+            rec["errors"] = (rec["errors"] + [
+                "%s: the held checkpoint ended with a transaction open or "
+                "aborted; it was %s" % (
+                    R_STEP_LEFT_TRANSACTION,
+                    "rolled back" if ended else "NOT rolled back")])[-5:]
+            if problem:
+                out["errors"]["CONNECTION_RESET"] = problem
 
 
 def schedule_held_review(slugs, *, get_pool=None, clock=time.time) -> dict:

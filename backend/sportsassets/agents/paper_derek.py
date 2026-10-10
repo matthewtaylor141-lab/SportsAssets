@@ -1844,8 +1844,11 @@ def owed_enter_overrun_bound_s() -> float:
     15 + (5 + 1) + (5 + 5 + 1) = 32 s with the defaults. Measured ends are
     milliseconds; this is the pathology bound. A caller's own published
     worst case does not include it -- pinnapi_reactive.worst_case_job_s
-    (24 s) and the paper pass's HARD_TIMEOUT_S can each be exceeded by up
-    to this much while an owed ENTER is in flight."""
+    (24 s) can be exceeded by up to this much while an owed ENTER is in
+    flight. The paper pass's HARD_TIMEOUT_S is not: since RC6.3c the pass
+    cuts a step that can owe an ENTER this much EARLIER and does not start
+    it with less than this left (paper_runtime.ENTER_OWING_STEPS,
+    paper_runtime.enter_overrun_holdback_s)."""
     return (ENTER_ORDER_GRACE_S + 3 * ENTER_ABANDON_WAIT_S
             + 2 * ENTER_TERMINATED_WAIT_S)
 

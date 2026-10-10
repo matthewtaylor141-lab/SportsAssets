@@ -1,5 +1,6 @@
-"""CAPITAL-CRITICAL: THE PAPER PASS ALWAYS RECORDS ITSELF, WHATEVER A STEP DOES
-(RC6.3b pass-stall).
+"""CAPITAL-CRITICAL: A STEP THAT ENDS WHEN IT IS CANCELLED CANNOT ERASE THE
+PAPER PASS'S RECORD (RC6.3b pass-stall; the claim is stated exactly in
+agents/paper_runtime.py and tests/test_rc63c_pass_hardening.py).
 
 Production, 2026-10-10 02:17Z onward (read-only readbacks): every paper pass
 ended `ran=false, PAPER_PASS_RAISED_OR_TIMED_OUT, "TimeoutError: "` -- one
@@ -27,6 +28,12 @@ Proved here, on a real Postgres through run_once (the production path):
   * the between-steps held checkpoint cannot run into the time kept for the
     record;
   * a pass the last-resort timeout still cuts names the step it was in.
+
+WHAT THIS DOES NOT CLAIM (RC6.3c): a step that does not end on cancellation (it
+swallows the cancel, keeps work running on the pass connection, blocks the event
+loop) is cut by HARD_TIMEOUT_S, the whole pass with it; a step that can owe an
+ENTER is held back by paper_derek.owed_enter_overrun_bound_s() (see
+test_rc63c_pass_hardening.py); the record itself can still fail (HEALTH).
 
 SYNTHETIC steps on a scratch test database; no venue, no order authority.
 """
