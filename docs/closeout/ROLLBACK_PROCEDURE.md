@@ -23,7 +23,18 @@ list only, never from another service's:
 |---|---|---|
 | `DEPLOY_PREVIOUS` (`from`, `to`) | the service is live on the release | its own previous live commit (`to`) only |
 | `NONE` (`stay_on`) | the service is NOT on the release (`ROLLBACK_SERVICE_NOT_ON_THE_RELEASE`) | none: it stays on its current commit |
-| `REFUSED` (`reason`) | its history is unreadable (also one row of the wrong shape where it decides what is live or what ran before: `ROLLBACK_DEPLOY_HISTORY_UNREADABLE`, never read past to an older commit), has no single live deploy, disagrees with `render.json`, or shows no previous live commit | none |
+| `REFUSED` (`reason`) | its history is unreadable (also one row of the wrong shape where it decides what is live or what ran before: `ROLLBACK_DEPLOY_HISTORY_UNREADABLE`, never read past to an older commit), has no single live deploy, disagrees with `render.json`, or shows no previous live commit; or, newer than the live deploy or between it and the previous live commit, a deploy status Render does not document (`ROLLBACK_DEPLOY_STATUS_UNKNOWN`), or a served (`deactivated`) deploy newer than the live one (`ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY`) | none |
+
+"Never served" is an allowlist of Render's own statuses: `build_failed`,
+`update_failed`, `canceled`, `pre_deploy_failed`, `created`, `queued`,
+`build_in_progress`, `update_in_progress`, `pre_deploy_in_progress`. Only
+those are skipped as moot. Any other status (`Deactivated`, `succeeded`, an
+empty string) is never read as "never served", because skipping a deploy that
+did serve would send the service back past what it last ran. If such a row is
+newer than the live deploy, or between it and the previous live commit, the
+service is refused by name. If it is older than the previous live commit, it
+is not counted as previously live. The tool and the judge use the same
+allowlist, and a test pins it.
 
 No command is ever written for a commit the service's own history does not
 show it was live on before. Production evidence: approved-judge pm-acceptance
