@@ -84,10 +84,14 @@ async def execute(pool,task):
         context={k:v for k,v in task['spec'].get('context',{}).items() if k in ('position_id','decision_id')}
         context['capability_task_id']=task['task_id']
         async with asyncio.timeout(55):
+            # question_only: an assigned review is a question, never a
+            # directive (rc6.3; Audrey's focus opens with a directive verb
+            # and every review of hers since 2026-10-03 was routed to the
+            # directive path and refused REQUIRES_OPERATOR_CREDENTIAL)
             reply=await P.converse(pool,agent=task['assignee'].lower(),role='command',
                                   message=question(task),context=context,now=time.time(),
                                   request_id=request_id(task),
-                                  allow_records_only=False)
+                                  allow_records_only=False,question_only=True)
     except asyncio.CancelledError:
         # Lease expiration enables recovery; never complete work on cancellation.
         raise

@@ -1130,9 +1130,22 @@ async def converse(db, *, agent: str, role: str, message: str,
                    context: dict | None = None, now: float, env=None,
                    http_client=None, request_id: str | None = None,
                    allow_records_only: bool = False,
-                   label: str | None = None) -> dict:
+                   label: str | None = None,
+                   question_only: bool = False) -> dict:
     """One user message in, one grounded persona answer out (see module
-    docstring). Never raises for a provider failure or an interruption."""
+    docstring). Never raises for a provider failure or an interruption.
+
+    `question_only` (rc6.3 capability): the caller only ever ASKS -- the
+    research worker's assigned review is a question about records, never a
+    management instruction -- so a message that merely reads like one is
+    answered from the facts instead of being handed to the directive path.
+    It removes a route, it grants none: the authority screen still runs
+    and still refuses, the role is unchanged, and nothing is recorded but
+    the exchange. Production (research-sql runs 38008493448, 38009039152):
+    Audrey's research question opens with her focus, "Prioritize recorded
+    findings ...", whose first word is a directive verb, so every one of her
+    reviews since 2026-10-03 02:06Z (912) went to the directive path and
+    came back REQUIRES_OPERATOR_CREDENTIAL in 0.1 s with no fact cited."""
     ag = P.agent_of(agent)
     if ag is None:
         return {"status": S_ERROR, "error": P.R_UNKNOWN_AGENT}
@@ -1153,16 +1166,21 @@ async def converse(db, *, agent: str, role: str, message: str,
     kw = dict(agent=ag, role=role, text=text, conversation_id=conversation_id,
               context=ctx, now=now, env=env, http_client=http_client,
               request_id=request_id, allow_records_only=allow_records_only,
-              label=label or AC.ROLE_LABELS.get(role))
+              label=label or AC.ROLE_LABELS.get(role),
+              question_only=bool(question_only))
     if request_id is None:
         return await _converse_impl(db, **kw)
     if not D.valid_request_id(request_id):
         return {"status": S_ERROR, "error": D.R_BAD_REQUEST_ID}
+    payload = {"conversation_id": conversation_id, "message": text,
+               "context": ctx, "allow_records_only": bool(allow_records_only)}
+    if question_only:
+        # only when set, so every other caller's stored request keeps its
+        # fingerprint; a question-only request is a different request
+        payload["question_only"] = True
     got = await D.idempotent_call(
         db, request_id=request_id, kind="persona_chat:" + ag,
-        requester_role=role, payload={
-            "conversation_id": conversation_id, "message": text,
-            "context": ctx, "allow_records_only": bool(allow_records_only)},
+        requester_role=role, payload=payload,
         now=now, run=lambda: _converse_impl(db, **kw))
     if got.get("refusal") == D.R_IDEMPOTENCY_MISMATCH:
         return dict(got, status=S_ERROR, error=D.R_IDEMPOTENCY_MISMATCH)
@@ -1173,12 +1191,15 @@ async def converse(db, *, agent: str, role: str, message: str,
 
 async def _converse_impl(db, *, agent, role, text, conversation_id, context,
                          now, env, http_client, request_id,
-                         allow_records_only, label) -> dict:
+                         allow_records_only, label,
+                         question_only=False) -> dict:
     out: dict[str, Any] = {"agent": agent.lower(), "role": role,
                            "can_control": role in D.CONTROL_ROLES}
     screen = D.screen_authority(text)
     plan = AC.route(text)
-    is_instruction = bool(plan.get("mutation")) and not screen["refused"]
+    # a question-only caller never reaches the directive path (see converse)
+    is_instruction = bool(plan.get("mutation")) and not screen["refused"] \
+        and not question_only
     cfg = llm_config(env)
     use_llm = bool(cfg["configured"])
     if not (screen["refused"] or is_instruction) and not use_llm \
