@@ -277,6 +277,52 @@ def fetch_responses(client: KV.KalshiClient, *, max_pages: int = MAX_PAGES) -> d
     return out
 
 
+# ── the read-only client (rc6.3 kalshi-shadow) ───────────────────────
+#
+# The captured Kalshi API-key page documents no read-only key scope
+# (research/kalshi_canonical_venue/REP_PRODUCTION_CONTRACT_2026-10-07/docs/
+# getting_started_api_keys.md), so READ-ONLY is enforced HERE, in the
+# transport, not trusted to the key or the caller: the client the SHADOW
+# reconciliation writer reads the account with can send a GET and nothing
+# else. A POST / DELETE / PUT / PATCH -- or any request carrying a body --
+# raises ReadOnlyViolation before a byte leaves the process. It is NOT a
+# kalshi_venue.TransportError, so the client does not turn it into an
+# "ambiguous venue answer": it surfaces as the exception it is.
+
+READ_ONLY_METHODS = ("GET",)
+
+
+class ReadOnlyViolation(RuntimeError):
+    """A non-read request reached the read-only Kalshi transport."""
+
+
+class GetOnlyTransport:
+    """kalshi_venue.Transport that forwards GETs (to `inner`, by default the
+    real requests transport, built on the first GET) and refuses the rest."""
+
+    def __init__(self, inner=None):
+        self._inner = inner
+
+    def send(self, method, url, *, headers, params, json_body, timeout):
+        m = str(method or "").upper()
+        if m not in READ_ONLY_METHODS or json_body is not None:
+            raise ReadOnlyViolation(
+                "%s refused: the Kalshi SHADOW client is read-only" % (m or "?"))
+        if self._inner is None:
+            self._inner = KV.RequestsTransport()
+        return self._inner.send(m, url, headers=headers, params=params,
+                                json_body=None, timeout=timeout)
+
+
+def read_only_client(env=None, *, transport=None, clock=time.time,
+                     timeout: float = KV.TIMEOUT_S) -> KV.KalshiClient:
+    """A KalshiClient whose every request passes the GET-only transport.
+    `transport` is the inner transport (tests inject a fake; production
+    leaves it None for the real one)."""
+    return KV.KalshiClient(GetOnlyTransport(transport), env=env, clock=clock,
+                           timeout=timeout)
+
+
 def read_only_reconciliation(client: KV.KalshiClient, *,
                              now: float | None = None) -> dict:
     cred = client.credential_state()
