@@ -351,9 +351,24 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
         # cannot be counted -- Allie's arithmetic still sees 0 (her module
         # is unchanged), but the haircut is labelled UNMEASURED below so no
         # reader (V2 included) takes that 0 for a measured "no correlation"
-        fixture = await conn.fetchrow(
-            OPC.OPEN_EXPOSURE_FIXTURE_SQL, acct, fx) if fx else None
-        book = await conn.fetchval(OPC.OPEN_EXPOSURE_BOOK_SQL, acct)
+        #
+        # ONE READ OF THE LEDGER A DECISION (RC6.3c allie-exposure scale):
+        # the book's cost and the fixture's open groups and cost come out of
+        # ONE statement, account-scoped inside its scans
+        # (open_position_canon.OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL); with no
+        # fixture only the book is read (OPEN_EXPOSURE_BOOK_SQL). The two
+        # statements this replaced aggregated the whole ledger twice a
+        # decision; the figures are the same numbers to the numeric
+        # (tests/test_rc63c_allie_exposure_reads_one_account_in_one_pass.py
+        # runs both forms on one seeded ledger).
+        if fx:
+            both = await conn.fetchrow(
+                OPC.OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL, acct, fx)
+            fixture = {"n": both["fixture_n"], "usd": both["fixture_usd"]}
+            book = both["book_usd"]
+        else:
+            fixture = None
+            book = await conn.fetchval(OPC.OPEN_EXPOSURE_BOOK_SQL, acct)
         em = await conn.fetchrow(
             "SELECT scale, max_order_usd FROM execmirror_control LIMIT 1")
         e = eddie if eddie.get("status") == "MEASURED" else {}

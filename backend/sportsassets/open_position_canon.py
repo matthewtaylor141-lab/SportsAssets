@@ -34,29 +34,82 @@ def is_open(open_qty) -> bool:
         return False
 
 
-#: EVERY OPEN PAPER POSITION, CANONICALLY: one row per (account, group,
-#: market, holding side) with open = bought - sold - the latest settlement
-#: version's qty, kept only when open > OPEN_QTY_EPS. No parameters; a
-#: reader narrows it (account, group, slug) in its own outer query. This is
-#: POSITIONS_SQL's arithmetic for all accounts at once.
-CANONICAL_OPEN_POSITIONS_SQL = """
+#: THE ONE TEMPLATE the canonical open-position rule is written in. It is
+#: expanded WITHOUT any scope into CANONICAL_OPEN_POSITIONS_SQL below (every
+#: reader's statement, byte for byte what it was before the template existed:
+#: tests/test_rc63c_allie_exposure_reads_one_account_in_one_pass.py pins the
+#: text), and WITH the account scope and the cost columns into the open
+#: EXPOSURE statement further down -- so the rule (BUY - SELL - the latest
+#: settlement version's qty, per account / group / market / side, kept above
+#: OPEN_QTY_EPS) is written ONCE and the exposure reads the same rule, not a
+#: copy of it.
+_OPEN_POSITIONS_TEMPLATE = """
     SELECT f.account_id, f.group_id, f.us_market_slug, f.holding_side,
-           f.bought - f.sold - coalesce(s.qty, 0) AS open_qty
+           f.bought - f.sold - coalesce(s.qty, 0) AS open_qty%(select_extra)s
       FROM (SELECT account_id, group_id, us_market_slug, holding_side,
                    coalesce(sum(qty) FILTER (WHERE direction='BUY'), 0)
                        AS bought,
                    coalesce(sum(qty) FILTER (WHERE direction='SELL'), 0)
-                       AS sold
-              FROM paper_fills
+                       AS sold%(fills_extra)s
+              FROM paper_fills%(fills_where)s
              GROUP BY account_id, group_id, us_market_slug, holding_side) f
       LEFT JOIN (SELECT DISTINCT ON (position_key) position_key, qty
-                   FROM paper_settlements
+                   FROM paper_settlements%(settlements_where)s
                   ORDER BY position_key, version DESC) s
         ON s.position_key = 'paperpos:' || f.account_id || ':' || f.group_id
                             || ':' || f.us_market_slug || ':'
                             || f.holding_side
      WHERE f.bought - f.sold - coalesce(s.qty, 0) > 1e-9
 """
+
+#: the exposure variant's extra columns, taken from the SAME single pass over
+#: paper_fills (the fixture, and what the BUYs cost including fees)
+_EXPOSURE_SELECT_EXTRA = """,
+           f.bought, f.fixture, f.buy_cost"""
+_EXPOSURE_FILLS_EXTRA = """,
+                   max(fixture) AS fixture,
+                   sum(gross_usd + fee_usd) FILTER (WHERE direction = 'BUY')
+                       AS buy_cost"""
+#: the account scope, INSIDE each scan: paper_fills by its account column;
+#: paper_settlements by the position key's own prefix (the rule joins on the
+#: key string alone, so the key's text -- not the settlement's account
+#: column -- is what can narrow it without changing what joins). $1 NULL
+#: means every account.
+_ACCOUNT_FILLS_WHERE = """
+             WHERE ($1::text IS NULL OR account_id = $1::text)"""
+_ACCOUNT_SETTLEMENTS_WHERE = """
+                  WHERE ($1::text IS NULL OR starts_with(
+                            position_key, 'paperpos:' || $1::text || ':'))"""
+
+#: every text the template's expansions can add, so a reader (or a test) can
+#: strip a scoped / costed expansion back to the bare canonical statement
+OPEN_POSITIONS_EXPANSIONS = (_EXPOSURE_SELECT_EXTRA, _EXPOSURE_FILLS_EXTRA,
+                             _ACCOUNT_FILLS_WHERE, _ACCOUNT_SETTLEMENTS_WHERE)
+
+
+def open_positions_sql(*, account_scoped: bool = False,
+                       with_cost: bool = False) -> str:
+    """The canonical open-position rule as a statement. Bare (the default)
+    it IS CANONICAL_OPEN_POSITIONS_SQL, byte for byte. `account_scoped`
+    puts $1 (an account id, or NULL for every account) inside BOTH scans;
+    `with_cost` adds the fixture and the BUY cost (incl. fees) of each
+    position out of the same pass over paper_fills. The arithmetic, the
+    grouping, the settlement rule and the epsilon are the template's and
+    cannot differ between expansions."""
+    return _OPEN_POSITIONS_TEMPLATE % {
+        "select_extra": _EXPOSURE_SELECT_EXTRA if with_cost else "",
+        "fills_extra": _EXPOSURE_FILLS_EXTRA if with_cost else "",
+        "fills_where": _ACCOUNT_FILLS_WHERE if account_scoped else "",
+        "settlements_where": (_ACCOUNT_SETTLEMENTS_WHERE if account_scoped
+                              else "")}
+
+
+#: EVERY OPEN PAPER POSITION, CANONICALLY: one row per (account, group,
+#: market, holding side) with open = bought - sold - the latest settlement
+#: version's qty, kept only when open > OPEN_QTY_EPS. No parameters; a
+#: reader narrows it (account, group, slug) in its own outer query. This is
+#: POSITIONS_SQL's arithmetic for all accounts at once.
+CANONICAL_OPEN_POSITIONS_SQL = open_positions_sql()
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -90,24 +143,47 @@ CANONICAL_OPEN_POSITIONS_SQL = """
 # $1 is the account (NULL: every account -- a caller that names none); $2 is
 # the fixture. Neither statement writes.
 
+# ── RC6.3c allie-exposure SCALE ─────────────────────────────────────────
+#
+# THE COST. allie_at_decision ran the fixture statement and the book
+# statement on EVERY decision, uncached, under Allie's 2.0 s component
+# timeout. Each aggregated the WHOLE of paper_fills twice (the canonical
+# open-quantity subquery, then the average-cost subquery joined back to it)
+# and the WHOLE of paper_settlements (DISTINCT ON over every account's
+# settlements), and only then kept the account asked for in the outermost
+# WHERE: 0.45 s a call at 120,000 fills (reviewer's measurement), growing
+# with every account's history rather than the deciding account's, and paid
+# twice per decision.
+#
+# THE SHAPE NOW. (1) The account sits INSIDE the scans: paper_fills by
+# account_id, paper_settlements by the position-key PREFIX
+# 'paperpos:<account>:' -- the key's own text, not the settlement's
+# account_id column, because the rule joins on the key string alone
+# (account 'x' with group 'y:g' and account 'x:y' with group 'g' build the
+# same key, and one settlement row closes both); a prefix scope can only
+# keep a superset of the rows an account's positions join to, so what joins
+# is exactly what joined. (2) paper_fills is aggregated ONCE: bought, sold,
+# the fixture and the BUY cost come out of the one GROUP BY, where the
+# previous statement aggregated it a second time to get the cost and joined
+# the two. (3) allie_at_decision asks for the book and the fixture in ONE
+# statement (OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL): one read of the ledger a
+# decision, not two. Results are identical: tests/test_rc63c_allie_exposure_
+# reads_one_account_in_one_pass.py runs the previous statements (verbatim)
+# against these on a seeded ledger across accounts -- open, exited, partly
+# exited, settled, re-settled, short-side, colliding keys -- and on a
+# random one, exact numerics, every account and none.
+#
+# `$1` NULL still means every account (a caller that names none).
+
 #: ONE ROW PER CANONICALLY OPEN POSITION with its remaining cost at the
-#: ledger's average cost; narrowed to the account in $1.
+#: ledger's average cost; narrowed to the account in $1 INSIDE the scans
+#: (open_positions_sql(account_scoped=True, with_cost=True)).
 OPEN_EXPOSURE_ROWS_SQL = """
     SELECT c.account_id, c.group_id, c.us_market_slug, c.holding_side,
-           b.fixture,
-           c.open_qty * (b.buy_cost / nullif(b.bought, 0)) AS exposure_usd
-      FROM (""" + CANONICAL_OPEN_POSITIONS_SQL + """) c
-      JOIN (SELECT account_id, group_id, us_market_slug, holding_side,
-                   max(fixture) AS fixture,
-                   sum(qty) FILTER (WHERE direction = 'BUY') AS bought,
-                   sum(gross_usd + fee_usd) FILTER (WHERE direction = 'BUY')
-                       AS buy_cost
-              FROM paper_fills
-             GROUP BY account_id, group_id, us_market_slug, holding_side) b
-        ON b.account_id = c.account_id AND b.group_id = c.group_id
-       AND b.us_market_slug = c.us_market_slug
-       AND b.holding_side = c.holding_side
-     WHERE ($1::text IS NULL OR c.account_id = $1::text)
+           c.fixture,
+           c.open_qty * (c.buy_cost / nullif(c.bought, 0)) AS exposure_usd
+      FROM (""" + open_positions_sql(account_scoped=True,
+                                    with_cost=True) + """) c
 """
 
 #: ALLIE'S FIXTURE INPUT: the groups still holding inventory on one fixture
@@ -122,6 +198,16 @@ OPEN_EXPOSURE_FIXTURE_SQL = (
 OPEN_EXPOSURE_BOOK_SQL = (
     "SELECT coalesce(sum(e.exposure_usd), 0) AS usd FROM ("
     + OPEN_EXPOSURE_ROWS_SQL + ") e")
+
+#: BOTH INPUTS FROM ONE READ OF THE LEDGER (what allie_at_decision executes
+#: when the decision names a fixture): the book's cost, and the fixture's
+#: open groups and cost -- the same figures, to the numeric, as the two
+#: statements above run separately. $1 account (or NULL), $2 fixture.
+OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL = (
+    "SELECT coalesce(sum(e.exposure_usd), 0) AS book_usd, "
+    "count(DISTINCT e.group_id) FILTER (WHERE e.fixture = $2) AS fixture_n, "
+    "coalesce(sum(e.exposure_usd) FILTER (WHERE e.fixture = $2), 0) "
+    "AS fixture_usd FROM (" + OPEN_EXPOSURE_ROWS_SQL + ") e")
 
 #: what an exposure input says about itself, recorded beside it
 OPEN_EXPOSURE_BASIS = (
