@@ -195,9 +195,12 @@ ORDER_REFUSED_FINDING = "PAPER_RISK_REFUSED_THE_ORDER"
 OWNER_POLICY_ACCOUNT = "paper_acct_main"
 OWNER_POLICY_ENTRY_USD = 1000.0
 
-#: ALLIE'S FIXTURE INPUT, THE SAME STATEMENT (canonical_components
-#: .allie_at_decision executes open_position_canon.OPEN_EXPOSURE_FIXTURE_SQL;
-#: a test pins that and that this IS that object). The graph's "current
+#: ALLIE'S FIXTURE INPUT, THE SAME ROWS (this IS
+#: open_position_canon.OPEN_EXPOSURE_FIXTURE_SQL; since RC6.3c
+#: canonical_components.allie_at_decision reads the fixture together with
+#: the book in ONE statement, OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL, built on
+#: the same OPEN_EXPOSURE_ROWS_SQL, so both count the same positions the
+#: same way; tests/test_correlation_graph.py pins all three). The graph's "current
 #: treatment" of a candidate is THIS query's answer fed through
 #: allie_capital's own haircut rule -- or, where the candidate's canonical
 #: intent exists, the allie component it recorded -- never a re-derivation
